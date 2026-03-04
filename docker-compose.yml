@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16
+    image: postgres:15-alpine
     container_name: postgres_db
     restart: unless-stopped
     environment:
@@ -11,8 +11,9 @@ services:
       - "5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
   redis:
-    image: redis/redis-stack:latest
+    image: redis/redis-stack-server:latest
     container_name: redis_cache
     restart: unless-stopped
     ports:
@@ -21,7 +22,7 @@ services:
       - redis_data:/data
 
   nats-server:
-    image: nats:latest
+    image: nats:2.10-alpine
     container_name: nats-server
     command: -js --http_port 8222
     ports:

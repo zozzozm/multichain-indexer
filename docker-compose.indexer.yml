@@ -9,7 +9,7 @@ services:
     network_mode: host
     environment:
       # Chain configuration - can be overridden via .env file
-      - CHAINS=${CHAINS:-tron_testnet}
+      - INDEX_CHAINS=${CHAINS:-tron_mainnet}
       - DEBUG=${DEBUG:-true}
       - CATCHUP=${CATCHUP:-true}
       - MANUAL=${MANUAL:-true}
@@ -23,4 +23,4 @@ services:
       - ./data:/app/data
       # Mount certificates directory for TLS/mTLS connections
       - ./certs:/app/certs:ro
-    command: ["index", "--chains=${CHAINS}", "--debug", "--catchup", "--manual"]
+    command: ["index", "--chains", "${INDEX_CHAINS:-tron_mainnet}", "--debug", "--catchup", "--manual"]
