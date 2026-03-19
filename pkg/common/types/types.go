@@ -44,9 +44,9 @@ const (
 type Transaction struct {
 	TxHash        string          `json:"txHash"`
 	NetworkId     string          `json:"networkId"`
-	BlockNumber   uint64          `json:"blockNumber"` // 0 for mempool transactions
+	BlockNumber   uint64          `json:"blockNumber"`   // 0 for mempool transactions
 	BlockHash     string          `json:"blockHash"`     // block hash for reorg-aware idempotency
-	TransferIndex string          `json:"transferIndex"` // unique position within tx (EVM only)
+	TransferIndex string          `json:"transferIndex"` // stable position or operation id when the chain can provide one
 	FromAddress   string          `json:"fromAddress"`
 	FromAddresses []string        `json:"fromAddresses,omitempty"`
 	ToAddress     string          `json:"toAddress"`
@@ -105,6 +105,18 @@ func (t Transaction) AllSenderAddresses() []string {
 	return nil
 }
 
+const (
+	MetadataKeyDestinationTag = "destination_tag"
+	MetadataKeyMemo           = "memo"
+	MetadataKeyMemoType       = "memo_type"
+	MetadataKeySubtype        = "subtype"
+	MetadataKeyCheckID        = "check_id"
+	MetadataKeyEscrowOwner    = "escrow_owner"
+	MetadataKeyEscrowSequence = "escrow_sequence"
+	MetadataKeyClaimableID    = "claimable_balance_id"
+	MetadataKeyClaimants      = "claimant_addresses"
+)
+
 func (t Transaction) MarshalBinary() ([]byte, error) {
 	bytes, err := json.Marshal(t)
 	if err != nil {
@@ -138,7 +150,7 @@ func (t Transaction) String() string {
 
 // Hash generates a deterministic hash used as the NATS idempotency key (Event Instance Identity).
 //
-// When TransferIndex is set (EVM): NetworkId|TxHash|BlockHash|TransferIndex|Direction
+// When TransferIndex is set: NetworkId|TxHash|BlockHash|TransferIndex|Direction
 // When TransferIndex is empty (non-EVM fallback): NetworkId|TxHash|BlockHash|From|To|Timestamp|Direction
 //
 // BlockHash ensures reorgs produce new hashes so consumers get updated data.
@@ -153,8 +165,8 @@ func (t Transaction) Hash() string {
 	builder.WriteByte('|')
 
 	if t.TransferIndex != "" {
-		// EVM (or any chain that populates TransferIndex):
-		// Exact positional identity — reorg-aware via BlockHash.
+		// Chains that populate TransferIndex get exact positional identity,
+		// still reorg-aware via BlockHash.
 		builder.WriteString(t.TransferIndex)
 		builder.WriteByte('|')
 		builder.WriteString(t.Direction)
@@ -169,6 +181,18 @@ func (t Transaction) Hash() string {
 		builder.WriteString(strconv.FormatUint(t.Timestamp, 10))
 		builder.WriteByte('|')
 		builder.WriteString(t.Direction)
+		if destinationTag := t.GetMetadataString(MetadataKeyDestinationTag); destinationTag != "" {
+			builder.WriteByte('|')
+			builder.WriteString(destinationTag)
+		}
+		if memo := t.GetMetadataString(MetadataKeyMemo); memo != "" {
+			builder.WriteByte('|')
+			builder.WriteString(memo)
+		}
+		if memoType := t.GetMetadataString(MetadataKeyMemoType); memoType != "" {
+			builder.WriteByte('|')
+			builder.WriteString(memoType)
+		}
 	}
 
 	hash := sha256.Sum256([]byte(builder.String()))
