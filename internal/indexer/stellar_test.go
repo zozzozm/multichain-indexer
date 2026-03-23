@@ -405,6 +405,54 @@ func TestStellarGetBlock_ParsesNativeAndIssuedPaymentsWithMemo(t *testing.T) {
 	assert.Equal(t, "0.00003", pathTx.TxFee.String())
 }
 
+func TestStellarConvertPayment_PathPaymentStoresSourceSideRouting(t *testing.T) {
+	t.Parallel()
+
+	idx := NewStellarIndexer(
+		"stellar_mainnet",
+		config.ChainConfig{NetworkId: "stellar_mainnet"},
+		nil,
+		nil,
+		mockStellarPubkeyStore{addresses: map[string]struct{}{"GDEST": {}}},
+	)
+
+	tx, ok := idx.convertPayment(
+		stellar.Payment{
+			Type:                  "path_payment_strict_send",
+			TransactionHash:       "tx-path",
+			TransactionSuccessful: true,
+			From:                  "GSOURCE",
+			To:                    "GDEST",
+			Amount:                "5.0000000",
+			AssetType:             "credit_alphanum4",
+			AssetCode:             "USDC",
+			AssetIssuer:           "GISSUER",
+			SourceAmount:          "10.0000000",
+			SourceAssetType:       "native",
+		},
+		nil,
+		21,
+		"ledger-hash",
+		"payment-1",
+		123,
+	)
+	require.True(t, ok)
+	assert.Equal(t, constant.TxTypeTokenTransfer, tx.Type)
+	assert.Equal(t, "GISSUER:USDC", tx.AssetAddress)
+	assert.Equal(t, "5.0000000", tx.Amount)
+	assert.Equal(t, string(constant.TxTypeNativeTransfer), tx.GetMetadataString(metadataKeySourceTxType))
+	assert.Equal(t, "10.0000000", tx.GetMetadataString(metadataKeySourceAmount))
+	assert.Equal(t, "", tx.GetMetadataString(metadataKeySourceAsset))
+
+	outTx := idx.NormalizeForDirection(tx, types.DirectionOut)
+	assert.Equal(t, constant.TxTypeNativeTransfer, outTx.Type)
+	assert.Equal(t, "", outTx.AssetAddress)
+	assert.Equal(t, "10.0000000", outTx.Amount)
+	assert.Equal(t, "", outTx.GetMetadataString(metadataKeySourceTxType))
+	assert.Equal(t, "", outTx.GetMetadataString(metadataKeySourceAmount))
+	assert.Equal(t, "", outTx.GetMetadataString(metadataKeySourceAsset))
+}
+
 func TestStellarGetBlock_FetchesTransactionDetailsLazily(t *testing.T) {
 	t.Parallel()
 
@@ -1019,6 +1067,19 @@ func TestStellarMainnetFetchAndParseTransactions(t *testing.T) {
 	}
 
 	testCases := []stellarRealTxCase{
+		{
+			name:          "native payment",
+			kind:          "payment",
+			txHash:        "81dba977244285fd3a6e9192ff2a594fe99d9bd6ec892533fe80c5f25c77c1f0",
+			transferIndex: "265365546521460737",
+			wantType:      constant.TxTypeNativeTransfer,
+			wantFrom:      "GBC6NRTTQLRCABQHIR5J4R4YDJWFWRAO4ZRQIM2SVI5GSIZ2HZ42RINW",
+			wantTo:        "GCZNOTQRRETQLBQH2MPWYMCLQBYMXKZI7XXYHS7F5RJHH7VMATQ57TQZ",
+			wantAmount:    "120.0621870",
+			verify: func(t *testing.T, tx types.Transaction, _ *StellarIndexer, _ *stellar.Payment, _ *stellar.Operation, _ []stellar.Effect) {
+				assert.Equal(t, "", tx.AssetAddress)
+			},
+		},
 		{
 			name:          "create account",
 			kind:          "payment",

@@ -196,6 +196,80 @@ func TestXRPConvertLedger_ParsesNativeAndIssuedPayments(t *testing.T) {
 	assert.Equal(t, "1", tokenTx.TransferIndex)
 }
 
+func TestXRPConvertPaymentTransaction_StoresSourceSideRoutingForPathPayment(t *testing.T) {
+	t.Parallel()
+
+	idx := NewXRPIndexer(
+		"xrp_mainnet",
+		config.ChainConfig{NetworkId: "xrp_mainnet"},
+		nil,
+		mockXRPPubkeyStore{addresses: map[string]struct{}{"rDest": {}}},
+	)
+
+	tx, ok := idx.convertPaymentTransaction(
+		xrp.Transaction{
+			Hash:            "TX_PATH",
+			Account:         "rSender",
+			Destination:     "rDest",
+			TransactionType: "Payment",
+			Fee:             "12",
+			Amount:          "5000000",
+		},
+		&xrp.Meta{
+			TransactionResult: "tesSUCCESS",
+			DeliveredAmount:   "5000000",
+			AffectedNodes: []xrp.Node{
+				{
+					ModifiedNode: &xrp.LedgerNode{
+						LedgerEntryType: "RippleState",
+						FinalFields: &xrp.LedgerFields{
+							Balance: map[string]any{
+								"currency": "USD",
+								"value":    "90",
+							},
+							LowLimit: map[string]any{
+								"currency": "USD",
+								"issuer":   "rSender",
+								"value":    "1000000000",
+							},
+							HighLimit: map[string]any{
+								"currency": "USD",
+								"issuer":   "rIssuer",
+								"value":    "0",
+							},
+						},
+						PreviousFields: &xrp.LedgerFields{
+							Balance: map[string]any{
+								"currency": "USD",
+								"value":    "100",
+							},
+						},
+					},
+				},
+			},
+		},
+		105,
+		"LEDGER_HASH",
+		0,
+		123,
+	)
+	require.True(t, ok)
+	assert.Equal(t, "5", tx.Amount)
+	assert.Equal(t, constant.TxTypeNativeTransfer, tx.Type)
+	assert.Equal(t, "", tx.AssetAddress)
+	assert.Equal(t, string(constant.TxTypeTokenTransfer), tx.GetMetadataString(metadataKeySourceTxType))
+	assert.Equal(t, "10", tx.GetMetadataString(metadataKeySourceAmount))
+	assert.Equal(t, "rIssuer:USD", tx.GetMetadataString(metadataKeySourceAsset))
+
+	outTx := idx.NormalizeForDirection(tx, types.DirectionOut)
+	assert.Equal(t, constant.TxTypeTokenTransfer, outTx.Type)
+	assert.Equal(t, "10", outTx.Amount)
+	assert.Equal(t, "rIssuer:USD", outTx.AssetAddress)
+	assert.Equal(t, "", outTx.GetMetadataString(metadataKeySourceTxType))
+	assert.Equal(t, "", outTx.GetMetadataString(metadataKeySourceAmount))
+	assert.Equal(t, "", outTx.GetMetadataString(metadataKeySourceAsset))
+}
+
 func TestXRPConvertLedger_RespectsTwoWayIndexing(t *testing.T) {
 	t.Parallel()
 

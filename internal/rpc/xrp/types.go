@@ -24,6 +24,7 @@ type Transaction struct {
 	Date            *int64      `json:"date,omitempty"`
 	LedgerIndex     json.Number `json:"ledger_index"`
 	Amount          any         `json:"Amount"`
+	SendMax         any         `json:"SendMax,omitempty"`
 	Meta            *Meta       `json:"meta,omitempty"`
 	MetaData        *Meta       `json:"metaData,omitempty"`
 }
@@ -60,6 +61,8 @@ type LedgerFields struct {
 	Destination    string  `json:"Destination,omitempty"`
 	DestinationTag *uint32 `json:"DestinationTag,omitempty"`
 	Amount         any     `json:"Amount,omitempty"`
+	HighLimit      any     `json:"HighLimit,omitempty"`
+	LowLimit       any     `json:"LowLimit,omitempty"`
 }
 
 type ledgerResponse struct {

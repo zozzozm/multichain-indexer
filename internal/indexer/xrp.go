@@ -47,6 +47,9 @@ func NewXRPIndexer(
 func (x *XRPIndexer) GetName() string                  { return strings.ToUpper(x.chainName) }
 func (x *XRPIndexer) GetNetworkType() enum.NetworkType { return enum.NetworkTypeXRP }
 func (x *XRPIndexer) GetNetworkInternalCode() string   { return x.config.InternalCode }
+func (x *XRPIndexer) NormalizeForDirection(tx types.Transaction, direction string) types.Transaction {
+	return normalizeDirectionalMetadata(tx, direction)
+}
 
 func (x *XRPIndexer) isMonitoredTransfer(from, to string) bool {
 	if x.pubkeyStore == nil {
@@ -309,6 +312,13 @@ func (x *XRPIndexer) convertPaymentTransaction(
 	result.AssetAddress = assetAddress
 	result.Amount = amount
 	result.Type = txType
+	if sourceAmount, sourceTxType, sourceAssetAddress, ok := x.sourcePaymentDetails(tx, meta); ok {
+		result.SetMetadata(metadataKeySourceTxType, string(sourceTxType))
+		result.SetMetadata(metadataKeySourceAmount, sourceAmount)
+		if sourceTxType == constant.TxTypeTokenTransfer {
+			result.SetMetadata(metadataKeySourceAsset, sourceAssetAddress)
+		}
+	}
 	setMetadataString(&result, types.MetadataKeyDestinationTag, formatDestinationTag(tx.DestinationTag))
 	return result, true
 }
@@ -505,6 +515,290 @@ func (x *XRPIndexer) isMonitoredAddress(address string) bool {
 	}
 	address = normalizeXRPAddress(address)
 	return address != "" && x.pubkeyStore.Exist(enum.NetworkTypeXRP, address)
+}
+
+func (x *XRPIndexer) sourcePaymentDetails(
+	tx xrp.Transaction,
+	meta *xrp.Meta,
+) (string, constant.TxType, string, bool) {
+	sender := normalizeXRPAddress(tx.Account)
+	if sender == "" || meta == nil {
+		return "", "", "", false
+	}
+
+	if amount, assetAddress, ok := xrpSourceIssuedAmount(meta, sender); ok {
+		return amount, constant.TxTypeTokenTransfer, assetAddress, true
+	}
+	if amount, ok := xrpSourceXRPAmount(meta, sender, tx.Fee); ok {
+		return amount, constant.TxTypeNativeTransfer, "", true
+	}
+
+	return "", "", "", false
+}
+
+func xrpSourceXRPAmount(meta *xrp.Meta, account string, fee string) (string, bool) {
+	account = normalizeXRPAddress(account)
+	if meta == nil || account == "" {
+		return "", false
+	}
+
+	feeValue, ok := parseXRPNumericDecimal(fee)
+	if !ok {
+		return "", false
+	}
+
+	for _, affected := range meta.AffectedNodes {
+		for _, node := range []*xrp.LedgerNode{affected.ModifiedNode, affected.CreatedNode} {
+			if node == nil || !strings.EqualFold(strings.TrimSpace(node.LedgerEntryType), "accountroot") {
+				continue
+			}
+			fields := ledgerNodeFields(node)
+			if fields == nil || !strings.EqualFold(normalizeXRPAddress(fields.Account), account) {
+				continue
+			}
+
+			finalBalance, ok := parseXRPNumericDecimal(xrpNumericString(fields.Balance))
+			if !ok {
+				continue
+			}
+
+			var previousBalance decimal.Decimal
+			if node.PreviousFields == nil {
+				continue
+			}
+			previousBalance, ok = parseXRPNumericDecimal(xrpNumericString(node.PreviousFields.Balance))
+			if !ok {
+				continue
+			}
+
+			spentDrops := previousBalance.Sub(finalBalance).Sub(feeValue)
+			if spentDrops.Cmp(decimal.Zero) <= 0 {
+				continue
+			}
+
+			return spentDrops.Div(decimal.NewFromInt(1_000_000)).String(), true
+		}
+	}
+
+	return "", false
+}
+
+func xrpSourceIssuedAmount(meta *xrp.Meta, account string) (string, string, bool) {
+	account = normalizeXRPAddress(account)
+	if meta == nil || account == "" {
+		return "", "", false
+	}
+
+	amountByAsset := make(map[string]decimal.Decimal)
+	for _, affected := range meta.AffectedNodes {
+		for _, node := range []*xrp.LedgerNode{affected.DeletedNode, affected.ModifiedNode, affected.CreatedNode} {
+			if node == nil || !strings.EqualFold(strings.TrimSpace(node.LedgerEntryType), "ripplestate") {
+				continue
+			}
+
+			lowAccount, highAccount, currency, ok := xrpRippleStateParticipants(node)
+			if !ok || (account != lowAccount && account != highAccount) {
+				continue
+			}
+
+			previousBalance, finalBalance, balanceCurrency, ok := xrpRippleStateBalances(node)
+			if !ok {
+				continue
+			}
+			if currency == "" {
+				currency = balanceCurrency
+			}
+			if currency == "" {
+				continue
+			}
+
+			var previousHeld, finalHeld decimal.Decimal
+			var issuer string
+			switch account {
+			case lowAccount:
+				issuer = highAccount
+				if previousBalance.Cmp(decimal.Zero) > 0 {
+					previousHeld = previousBalance
+				}
+				if finalBalance.Cmp(decimal.Zero) > 0 {
+					finalHeld = finalBalance
+				}
+			case highAccount:
+				issuer = lowAccount
+				if previousBalance.Cmp(decimal.Zero) < 0 {
+					previousHeld = previousBalance.Neg()
+				}
+				if finalBalance.Cmp(decimal.Zero) < 0 {
+					finalHeld = finalBalance.Neg()
+				}
+			}
+
+			spent := previousHeld.Sub(finalHeld)
+			if spent.Cmp(decimal.Zero) <= 0 {
+				continue
+			}
+
+			assetAddress := formatXRPIssuedCurrency(issuer, currency)
+			if assetAddress == "" {
+				continue
+			}
+			amountByAsset[assetAddress] = amountByAsset[assetAddress].Add(spent)
+		}
+	}
+
+	var (
+		bestAsset  string
+		bestAmount decimal.Decimal
+	)
+	for assetAddress, amount := range amountByAsset {
+		if amount.Cmp(bestAmount) > 0 {
+			bestAsset = assetAddress
+			bestAmount = amount
+		}
+	}
+	if bestAsset == "" || bestAmount.Cmp(decimal.Zero) <= 0 {
+		return "", "", false
+	}
+
+	return bestAmount.String(), bestAsset, true
+}
+
+func xrpRippleStateParticipants(node *xrp.LedgerNode) (string, string, string, bool) {
+	for _, fields := range []*xrp.LedgerFields{node.FinalFields, node.NewFields, node.PreviousFields} {
+		if fields == nil {
+			continue
+		}
+
+		lowAccount, lowCurrency, lowOK := xrpLimitAccount(fields.LowLimit)
+		highAccount, highCurrency, highOK := xrpLimitAccount(fields.HighLimit)
+		if !lowOK || !highOK {
+			continue
+		}
+
+		currency := lowCurrency
+		if currency == "" {
+			currency = highCurrency
+		}
+		return lowAccount, highAccount, currency, true
+	}
+
+	return "", "", "", false
+}
+
+func xrpRippleStateBalances(node *xrp.LedgerNode) (decimal.Decimal, decimal.Decimal, string, bool) {
+	if node == nil {
+		return decimal.Zero, decimal.Zero, "", false
+	}
+
+	var (
+		previousBalance decimal.Decimal
+		finalBalance    decimal.Decimal
+		currency        string
+		ok              bool
+	)
+
+	switch {
+	case node.FinalFields != nil:
+		currency, finalBalance, ok = xrpIssuedBalance(node.FinalFields.Balance)
+		if !ok {
+			return decimal.Zero, decimal.Zero, "", false
+		}
+		previousBalance = finalBalance
+		if node.PreviousFields != nil && node.PreviousFields.Balance != nil {
+			if previousCurrency, previous, previousOK := xrpIssuedBalance(node.PreviousFields.Balance); previousOK {
+				previousBalance = previous
+				if currency == "" {
+					currency = previousCurrency
+				}
+			}
+		}
+	case node.NewFields != nil:
+		currency, finalBalance, ok = xrpIssuedBalance(node.NewFields.Balance)
+		if !ok {
+			return decimal.Zero, decimal.Zero, "", false
+		}
+	case node.PreviousFields != nil:
+		currency, previousBalance, ok = xrpIssuedBalance(node.PreviousFields.Balance)
+		if !ok {
+			return decimal.Zero, decimal.Zero, "", false
+		}
+	default:
+		return decimal.Zero, decimal.Zero, "", false
+	}
+
+	return previousBalance, finalBalance, currency, true
+}
+
+func xrpLimitAccount(raw any) (string, string, bool) {
+	parsed, ok := xrpIssuedAmountValue(raw)
+	if !ok {
+		return "", "", false
+	}
+
+	account := normalizeXRPAddress(parsed.Issuer)
+	currency := strings.TrimSpace(parsed.Currency)
+	if account == "" || currency == "" {
+		return "", "", false
+	}
+
+	return account, currency, true
+}
+
+func xrpIssuedBalance(raw any) (string, decimal.Decimal, bool) {
+	parsed, ok := xrpIssuedAmountValue(raw)
+	if !ok {
+		return "", decimal.Zero, false
+	}
+
+	value, ok := parseXRPNumericDecimal(parsed.Value)
+	if !ok {
+		return "", decimal.Zero, false
+	}
+
+	currency := strings.TrimSpace(parsed.Currency)
+	if currency == "" {
+		return "", decimal.Zero, false
+	}
+
+	return currency, value, true
+}
+
+func xrpIssuedAmountValue(raw any) (xrp.IssuedCurrencyAmount, bool) {
+	switch value := raw.(type) {
+	case map[string]any:
+		var parsed xrp.IssuedCurrencyAmount
+		data, err := json.Marshal(value)
+		if err != nil {
+			return xrp.IssuedCurrencyAmount{}, false
+		}
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return xrp.IssuedCurrencyAmount{}, false
+		}
+		if strings.TrimSpace(parsed.Currency) == "" || strings.TrimSpace(parsed.Value) == "" {
+			return xrp.IssuedCurrencyAmount{}, false
+		}
+		return parsed, true
+	case xrp.IssuedCurrencyAmount:
+		if strings.TrimSpace(value.Currency) == "" || strings.TrimSpace(value.Value) == "" {
+			return xrp.IssuedCurrencyAmount{}, false
+		}
+		return value, true
+	default:
+		return xrp.IssuedCurrencyAmount{}, false
+	}
+}
+
+func parseXRPNumericDecimal(raw string) (decimal.Decimal, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return decimal.Zero, false
+	}
+
+	value, err := decimal.NewFromString(raw)
+	if err != nil {
+		return decimal.Zero, false
+	}
+	return value, true
 }
 
 func accountDeleteAmount(meta *xrp.Meta, destination string) (string, bool) {

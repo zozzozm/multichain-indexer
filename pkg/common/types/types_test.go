@@ -29,6 +29,7 @@ func TestTransactionBinaryRoundTripPreservesRoutingFields(t *testing.T) {
 	tx.SetMetadata(MetadataKeyDestinationTag, "12345")
 	tx.SetMetadata(MetadataKeyMemo, "invoice-42")
 	tx.SetMetadata(MetadataKeyMemoType, "text")
+	tx.SetMetadata("custom_routing_note", "internal")
 
 	data, err := tx.MarshalBinary()
 	require.NoError(t, err)
@@ -38,6 +39,7 @@ func TestTransactionBinaryRoundTripPreservesRoutingFields(t *testing.T) {
 	require.Equal(t, "12345", decoded.GetMetadataString(MetadataKeyDestinationTag))
 	require.Equal(t, "invoice-42", decoded.GetMetadataString(MetadataKeyMemo))
 	require.Equal(t, "text", decoded.GetMetadataString(MetadataKeyMemoType))
+	require.Equal(t, "internal", decoded.GetMetadataString("custom_routing_note"))
 }
 
 func TestTransactionHashIncludesRoutingFields(t *testing.T) {

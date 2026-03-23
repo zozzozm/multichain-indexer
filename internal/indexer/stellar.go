@@ -53,6 +53,9 @@ func NewStellarIndexer(
 func (s *StellarIndexer) GetName() string                  { return strings.ToUpper(s.chainName) }
 func (s *StellarIndexer) GetNetworkType() enum.NetworkType { return enum.NetworkTypeStellar }
 func (s *StellarIndexer) GetNetworkInternalCode() string   { return s.config.InternalCode }
+func (s *StellarIndexer) NormalizeForDirection(tx types.Transaction, direction string) types.Transaction {
+	return normalizeDirectionalMetadata(tx, direction)
+}
 
 func (s *StellarIndexer) isMonitoredTransfer(from, to string) bool {
 	if s.pubkeyStore == nil {
@@ -489,6 +492,13 @@ func (s *StellarIndexer) convertPayment(
 	}
 	if memoType != "" {
 		tx.SetMetadata(types.MetadataKeyMemoType, memoType)
+	}
+	if sourceType, sourceAssetAddress, sourceAmount, ok := stellarSourcePaymentDetails(payment); ok {
+		tx.SetMetadata(metadataKeySourceTxType, string(sourceType))
+		tx.SetMetadata(metadataKeySourceAmount, sourceAmount)
+		if sourceType == constant.TxTypeTokenTransfer {
+			tx.SetMetadata(metadataKeySourceAsset, sourceAssetAddress)
+		}
 	}
 
 	return tx, true
@@ -1019,6 +1029,28 @@ func isNativeStellarPayment(payment stellar.Payment) bool {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(payment.AssetType), "native")
+}
+
+func stellarSourcePaymentDetails(payment stellar.Payment) (constant.TxType, string, string, bool) {
+	switch strings.ToLower(strings.TrimSpace(payment.Type)) {
+	case "path_payment_strict_receive", "path_payment_strict_recieve", "path_payment_strict_send":
+	default:
+		return "", "", "", false
+	}
+
+	amount := strings.TrimSpace(payment.SourceAmount)
+	if amount == "" {
+		return "", "", "", false
+	}
+	if strings.EqualFold(strings.TrimSpace(payment.SourceAssetType), "native") {
+		return constant.TxTypeNativeTransfer, "", amount, true
+	}
+
+	assetAddress := formatStellarAsset(payment.SourceAssetIssuer, payment.SourceAssetCode)
+	if assetAddress == "" {
+		return "", "", "", false
+	}
+	return constant.TxTypeTokenTransfer, assetAddress, amount, true
 }
 
 func stellarTransferFields(payment stellar.Payment) (string, string, string) {

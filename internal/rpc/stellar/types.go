@@ -42,6 +42,10 @@ type Payment struct {
 	Account               string `json:"account"`
 	Into                  string `json:"into"`
 	SourceAccount         string `json:"source_account"`
+	SourceAmount          string `json:"source_amount"`
+	SourceAssetType       string `json:"source_asset_type"`
+	SourceAssetCode       string `json:"source_asset_code"`
+	SourceAssetIssuer     string `json:"source_asset_issuer"`
 	Amount                string `json:"amount"`
 	StartingBalance       string `json:"starting_balance"`
 	AssetType             string `json:"asset_type"`
