@@ -2,7 +2,9 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/fystack/multichain-indexer/internal/rpc"
 	"github.com/fystack/multichain-indexer/internal/rpc/xrp"
@@ -48,6 +50,60 @@ func (m *mockXRPAPI) BatchGetLedgersByIndex(_ context.Context, ledgerIndexes []u
 		out[ledgerIndex] = m.ledgers[ledgerIndex]
 	}
 	return out, nil
+}
+
+const xrpMainnetRPC = "https://xrplcluster.com"
+
+func newTestXRPLiveIndexer(t *testing.T) (*XRPIndexer, *xrp.Client) {
+	t.Helper()
+
+	client := xrp.NewClient(xrpMainnetRPC, nil, 30*time.Second, nil)
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+
+	failover := rpc.NewFailover[xrp.XRPLAPI](nil)
+	require.NoError(t, failover.AddProvider(&rpc.Provider{
+		Name:       "xrp-mainnet",
+		URL:        xrpMainnetRPC,
+		Network:    "xrp_mainnet",
+		ClientType: rpc.ClientTypeRPC,
+		Client:     client,
+		State:      rpc.StateHealthy,
+	}))
+
+	return NewXRPIndexer(
+		"xrp_mainnet",
+		config.ChainConfig{NetworkId: "xrp_mainnet"},
+		failover,
+		nil,
+	), client
+}
+
+func findXRPBlockTransaction(t *testing.T, block *types.Block, txHash string) types.Transaction {
+	t.Helper()
+
+	for _, tx := range block.Transactions {
+		if tx.TxHash == txHash {
+			return tx
+		}
+	}
+
+	t.Fatalf("transaction %s not found in block %d", txHash, block.Number)
+	return types.Transaction{}
+}
+
+func findXRPLedgerTransactionIndex(t *testing.T, ledger *xrp.Ledger, txHash string) string {
+	t.Helper()
+
+	for i, tx := range ledger.Transactions {
+		if tx.Hash == txHash {
+			return fmt.Sprintf("%d", i)
+		}
+	}
+
+	t.Fatalf("transaction %s not found in ledger %s", txHash, ledger.LedgerIndex.String())
+	return ""
 }
 
 func TestXRPConvertLedger_ParsesNativeAndIssuedPayments(t *testing.T) {
@@ -449,4 +505,149 @@ func TestXRPGetBlocksByNumbers_PreservesInputOrder(t *testing.T) {
 	assert.Equal(t, "L7", results[0].Block.Hash)
 	assert.Equal(t, uint64(3), results[1].Number)
 	assert.Equal(t, "L3", results[1].Block.Hash)
+}
+
+func TestXRPMainnetFetchAndParseTransactions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	type xrpRealTxCase struct {
+		name         string
+		ledgerIndex  uint64
+		txHash       string
+		wantType     constant.TxType
+		wantFrom     string
+		wantTo       string
+		wantAmount   string
+		wantAsset    string
+		wantMetadata map[string]string
+	}
+
+	testCases := []xrpRealTxCase{
+		{
+			name:        "native payment",
+			ledgerIndex: 103056832,
+			txHash:      "030944CC6EFC5193312C41A635D9E5CE67B982ABCE3625238F7D91472C60D55C",
+			wantType:    constant.TxTypeNativeTransfer,
+			wantFrom:    "rJrFQCQKgUJwG6bnDLyX33ea4DwWcjk6P3",
+			wantTo:      "rpW6DG5zYZrgvQvo2paEQaM4TqWQ86EGbS",
+			wantAmount:  "1.803482",
+		},
+		{
+			name:        "issued payment",
+			ledgerIndex: 94229458,
+			txHash:      "DF31D6B64DFB75600591235BA000B2D2C00C6989A84AB1DD596B5CB9FA8D109B",
+			wantType:    constant.TxTypeTokenTransfer,
+			wantFrom:    "rXPMxDRxMM6JLk8AMVh569iap3TtnjaF3",
+			wantTo:      "rG3cUwFd6UrZocrEDm17b8YZeaHGaNmJBg",
+			wantAmount:  "815",
+			wantAsset:   "rG4kgkvbAiy69t6keLzSBGTgRk8hgJM7Go:4245415652000000000000000000000000000000",
+		},
+		{
+			name:        "account delete",
+			ledgerIndex: 103056689,
+			txHash:      "BDB1F216067FDC16CA70E585900C72CE75450B1D2524269137C2C4CE59CFA5D5",
+			wantType:    constant.TxTypeNativeTransfer,
+			wantFrom:    "rauksASXjkCF13cpjDGA1DCgWWRm4arJu4",
+			wantTo:      "rMkJJ4HHHBRdeHvE2UXx1xPDh4hnuRW9TZ",
+			wantAmount:  "0.899292",
+			wantMetadata: map[string]string{
+				types.MetadataKeySubtype:        "account_delete",
+				types.MetadataKeyDestinationTag: "1717742333",
+			},
+		},
+		{
+			name:        "check cash",
+			ledgerIndex: 103056610,
+			txHash:      "9317A1D9C13A618B8BE74A22D846B6AD70D62364900E8DAA720D79221CFCDF5B",
+			wantType:    constant.TxTypeNativeTransfer,
+			wantFrom:    "rNsvWWTquJ2rWhGcTEx1AEoWte7ZD9VQPe",
+			wantTo:      "ra61uRmrMG1hpVQKhkL6pMwbJqdYcK1FT7",
+			wantAmount:  "4.004482",
+			wantMetadata: map[string]string{
+				types.MetadataKeySubtype: "check_cash",
+				types.MetadataKeyCheckID: "3C00D77DE88D4C6AA8E3844AA00D68347925D2CB4ABC987E65AAB9D53CDEB4F0",
+			},
+		},
+		{
+			name:        "escrow finish",
+			ledgerIndex: 100398890,
+			txHash:      "2861C22727E48831F8D45E304F15631C8927D52E46E6ED5060929FE2C7A83A34",
+			wantType:    constant.TxTypeNativeTransfer,
+			wantFrom:    "rw37cgPnjt57zqKgFuwqZExsiq79A3kZuP",
+			wantTo:      "raftCiiYJoU5UrkBKjAoHfLuo6iZDotLr6",
+			wantAmount:  "58.974",
+			wantMetadata: map[string]string{
+				types.MetadataKeySubtype:        "escrow_finish",
+				types.MetadataKeyEscrowOwner:    "rw37cgPnjt57zqKgFuwqZExsiq79A3kZuP",
+				types.MetadataKeyEscrowSequence: "76046814",
+			},
+		},
+		{
+			name:        "clawback",
+			ledgerIndex: 102983492,
+			txHash:      "ADCF519C04EB8AC273EE1C136258D8A62833E2E57AE3A56EB9C6595EB272FB05",
+			wantType:    constant.TxTypeTokenTransfer,
+			wantFrom:    "rLqBaPeR8xe4d1RJ7tBg6iFVyJjpo1rS2T",
+			wantTo:      xrpBurnAddress,
+			wantAmount:  "200",
+			wantAsset:   "r4WspQvEcvCjLQz6cDAxTS5vV6rQ9GuKsF:CLW",
+			wantMetadata: map[string]string{
+				types.MetadataKeySubtype: "clawback",
+			},
+		},
+	}
+
+	enabled := false
+	for _, tc := range testCases {
+		if tc.ledgerIndex != 0 && tc.txHash != "" {
+			enabled = true
+			break
+		}
+	}
+	if !enabled {
+		t.Skip("hardcoded real mainnet test cases are empty")
+	}
+
+	idx, client := newTestXRPLiveIndexer(t)
+
+	for _, tc := range testCases {
+		tc := tc
+		if tc.ledgerIndex == 0 || tc.txHash == "" {
+			continue
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			ledger, err := client.GetLedgerByIndex(ctx, tc.ledgerIndex)
+			require.NoError(t, err, "should fetch real mainnet ledger %d", tc.ledgerIndex)
+			require.NotNil(t, ledger)
+
+			block, err := idx.GetBlock(ctx, tc.ledgerIndex)
+			require.NoError(t, err, "should parse real mainnet ledger %d", tc.ledgerIndex)
+			require.NotNil(t, block)
+
+			tx := findXRPBlockTransaction(t, block, tc.txHash)
+			require.NotEmpty(t, tx.TxHash)
+			require.NotEmpty(t, tx.FromAddress)
+			require.NotEmpty(t, tx.ToAddress)
+			require.NotEmpty(t, tx.Type)
+
+			assert.Equal(t, tc.txHash, tx.TxHash)
+			assert.Equal(t, tc.wantFrom, tx.FromAddress)
+			assert.Equal(t, tc.wantTo, tx.ToAddress)
+			assert.Equal(t, tc.wantAmount, tx.Amount)
+			assert.Equal(t, tc.wantAsset, tx.AssetAddress)
+			assert.Equal(t, tc.wantType, tx.Type)
+			assert.Equal(t, block.Hash, tx.BlockHash)
+			assert.Equal(t, findXRPLedgerTransactionIndex(t, ledger, tc.txHash), tx.TransferIndex)
+
+			for key, want := range tc.wantMetadata {
+				assert.Equal(t, want, tx.GetMetadataString(key), "metadata %s", key)
+			}
+		})
+	}
 }

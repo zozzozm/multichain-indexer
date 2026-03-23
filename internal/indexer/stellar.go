@@ -237,7 +237,7 @@ func (s *StellarIndexer) convertLedger(
 		}
 
 		var effects []stellar.Effect
-		if strings.EqualFold(strings.TrimSpace(operation.Type), "create_claimable_balance") {
+		if stellarOperationNeedsEffects(operation.Type) {
 			effects, err = s.getCachedOperationEffects(ctx, effectsByOperation, effectsFetched, operation.ID)
 			if err != nil {
 				return nil, err
@@ -310,6 +310,15 @@ func (s *StellarIndexer) shouldProcessOperation(operation stellar.Operation) boo
 		txType, _, ok := stellarAssetFromOperation(operation.Asset)
 		return ok && txType == constant.TxTypeTokenTransfer && strings.TrimSpace(operation.Amount) != ""
 	case "create_claimable_balance", "claim_claimable_balance", "clawback_claimable_balance":
+		return true
+	default:
+		return false
+	}
+}
+
+func stellarOperationNeedsEffects(operationType string) bool {
+	switch strings.ToLower(strings.TrimSpace(operationType)) {
+	case "create_claimable_balance", "claim_claimable_balance":
 		return true
 	default:
 		return false
@@ -512,9 +521,9 @@ func (s *StellarIndexer) convertOperation(
 	case "create_claimable_balance":
 		return s.convertCreateClaimableBalanceOperation(operation, effects, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
 	case "claim_claimable_balance":
-		return s.convertClaimClaimableBalanceOperation(operation, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
+		return s.convertClaimClaimableBalanceOperation(operation, effects, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
 	case "clawback_claimable_balance":
-		return s.convertClawbackClaimableBalanceOperation(operation, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
+		return s.convertClawbackClaimableBalanceOperation(operation, effects, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
 	default:
 		return types.Transaction{}, false, nil
 	}
@@ -595,14 +604,13 @@ func (s *StellarIndexer) convertCreateClaimableBalanceOperation(
 		return types.Transaction{}, false, err
 	}
 
-	shouldEmit := s.anyMonitoredAddress(claimants) || (s.config.TwoWayIndexing && s.isMonitoredAddress(sourceAccount))
+	shouldEmit := s.config.TwoWayIndexing && s.isMonitoredAddress(sourceAccount)
 	if !shouldEmit {
 		return types.Transaction{}, false, nil
 	}
 
 	tx := s.newOperationTransaction(operation, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
 	tx.FromAddress = sourceAccount
-	tx.ToAddress = stellarClaimableBalanceAddress(balanceID)
 	tx.AssetAddress = assetAddress
 	tx.Amount = amount
 	tx.Type = txType
@@ -616,6 +624,7 @@ func (s *StellarIndexer) convertCreateClaimableBalanceOperation(
 
 func (s *StellarIndexer) convertClaimClaimableBalanceOperation(
 	operation stellar.Operation,
+	effects []stellar.Effect,
 	txDetail *stellar.Transaction,
 	ledgerSequence uint64,
 	blockHash string,
@@ -627,14 +636,25 @@ func (s *StellarIndexer) convertClaimClaimableBalanceOperation(
 		return types.Transaction{}, false, nil
 	}
 	state, found, err := s.loadClaimableBalanceState(balanceID)
-	if err != nil || !found {
+	if err != nil {
 		return types.Transaction{}, false, err
 	}
-	if err := s.deleteClaimableBalanceState(balanceID); err != nil {
-		return types.Transaction{}, false, err
+	if found {
+		if err := s.deleteClaimableBalanceState(balanceID); err != nil {
+			return types.Transaction{}, false, err
+		}
+	} else {
+		state, found = stellarClaimableBalanceStateFromEffect(findStellarEffect(effects, "claimable_balance_claimed"))
+		if !found {
+			return types.Transaction{}, false, nil
+		}
 	}
 
 	claimant := normalizeStellarAddress(operation.Claimant)
+	if claimant != "" {
+		state.Claimants = []string{claimant}
+	}
+
 	if claimant == "" || !s.isMonitoredAddress(claimant) {
 		return types.Transaction{}, false, nil
 	}
@@ -645,7 +665,6 @@ func (s *StellarIndexer) convertClaimClaimableBalanceOperation(
 	}
 
 	tx := s.newOperationTransaction(operation, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
-	tx.FromAddress = stellarClaimableBalanceAddress(balanceID)
 	tx.ToAddress = claimant
 	tx.AssetAddress = assetAddress
 	tx.Amount = strings.TrimSpace(state.Amount)
@@ -657,6 +676,7 @@ func (s *StellarIndexer) convertClaimClaimableBalanceOperation(
 
 func (s *StellarIndexer) convertClawbackClaimableBalanceOperation(
 	operation stellar.Operation,
+	effects []stellar.Effect,
 	txDetail *stellar.Transaction,
 	ledgerSequence uint64,
 	blockHash string,
@@ -667,32 +687,16 @@ func (s *StellarIndexer) convertClawbackClaimableBalanceOperation(
 	if balanceID == "" {
 		return types.Transaction{}, false, nil
 	}
-	state, found, err := s.loadClaimableBalanceState(balanceID)
-	if err != nil || !found {
+	_, found, err := s.loadClaimableBalanceState(balanceID)
+	if err != nil {
 		return types.Transaction{}, false, err
 	}
-	if err := s.deleteClaimableBalanceState(balanceID); err != nil {
-		return types.Transaction{}, false, err
+	if found {
+		if err := s.deleteClaimableBalanceState(balanceID); err != nil {
+			return types.Transaction{}, false, err
+		}
 	}
-
-	if !s.anyMonitoredAddress(state.Claimants) {
-		return types.Transaction{}, false, nil
-	}
-
-	txType, assetAddress, ok := stellarAssetFromOperation(state.Asset)
-	if !ok || strings.TrimSpace(state.Amount) == "" {
-		return types.Transaction{}, false, nil
-	}
-
-	tx := s.newOperationTransaction(operation, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
-	tx.FromAddress = stellarClaimableBalanceAddress(balanceID)
-	tx.ToAddress = stellarBurnAddress
-	tx.AssetAddress = assetAddress
-	tx.Amount = strings.TrimSpace(state.Amount)
-	tx.Type = txType
-	tx.SetMetadata(types.MetadataKeySubtype, "clawback_claimable_balance")
-	tx.SetMetadata(types.MetadataKeyClaimableID, balanceID)
-	return tx, true, nil
+	return types.Transaction{}, false, nil
 }
 
 func (s *StellarIndexer) newOperationTransaction(
@@ -746,7 +750,7 @@ func (s *StellarIndexer) newOperationTransaction(
 func (s *StellarIndexer) fetchEffectsForOperations(ctx context.Context, operations []stellar.Operation) (map[string][]stellar.Effect, error) {
 	effectsByOperation := make(map[string][]stellar.Effect)
 	for _, operation := range operations {
-		if !strings.EqualFold(strings.TrimSpace(operation.Type), "create_claimable_balance") {
+		if !stellarOperationNeedsEffects(operation.Type) {
 			continue
 		}
 		operationID := strings.TrimSpace(operation.ID)
@@ -857,6 +861,24 @@ func findStellarEffect(effects []stellar.Effect, effectType string) *stellar.Eff
 		}
 	}
 	return nil
+}
+
+func stellarClaimableBalanceStateFromEffect(effect *stellar.Effect) (stellarClaimableBalanceState, bool) {
+	if effect == nil {
+		return stellarClaimableBalanceState{}, false
+	}
+
+	state := stellarClaimableBalanceState{
+		Asset:  strings.TrimSpace(effect.Asset),
+		Amount: strings.TrimSpace(effect.Amount),
+	}
+	if claimant := normalizeStellarAddress(effect.Account); claimant != "" {
+		state.Claimants = []string{claimant}
+	}
+	if state.Asset == "" || state.Amount == "" {
+		return stellarClaimableBalanceState{}, false
+	}
+	return state, true
 }
 
 func stellarTransferIndex(payment stellar.Payment, paymentIndex int) string {

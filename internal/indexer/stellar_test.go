@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fystack/multichain-indexer/internal/rpc"
 	"github.com/fystack/multichain-indexer/internal/rpc/stellar"
@@ -88,6 +89,61 @@ func (m *mockStellarAPI) GetTransaction(_ context.Context, hash string) (*stella
 	}
 	m.mu.Unlock()
 	return m.transactions[hash], nil
+}
+
+const stellarMainnetHorizon = "https://horizon.stellar.org"
+
+func newTestStellarLiveIndexer(t *testing.T, kvstore infra.KVStore) (*StellarIndexer, *stellar.Client) {
+	t.Helper()
+
+	client := stellar.NewClient(stellarMainnetHorizon, nil, 30*time.Second, nil)
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+
+	failover := rpc.NewFailover[stellar.StellarAPI](nil)
+	require.NoError(t, failover.AddProvider(&rpc.Provider{
+		Name:       "stellar-mainnet",
+		URL:        stellarMainnetHorizon,
+		Network:    "stellar_mainnet",
+		ClientType: rpc.ClientTypeREST,
+		Client:     client,
+		State:      rpc.StateHealthy,
+	}))
+
+	return NewStellarIndexer(
+		"stellar_mainnet",
+		config.ChainConfig{NetworkId: "stellar_mainnet", TwoWayIndexing: true},
+		failover,
+		kvstore,
+		nil,
+	), client
+}
+
+func findStellarPayment(t *testing.T, payments []stellar.Payment, pagingToken string) stellar.Payment {
+	t.Helper()
+
+	for _, payment := range payments {
+		if payment.PagingToken == pagingToken {
+			return payment
+		}
+	}
+
+	t.Fatalf("payment with paging token %s not found", pagingToken)
+	return stellar.Payment{}
+}
+
+func findStellarOperation(t *testing.T, operations []stellar.Operation, operationID string) stellar.Operation {
+	t.Helper()
+
+	for _, operation := range operations {
+		if operation.ID == operationID {
+			return operation
+		}
+	}
+
+	t.Fatalf("operation %s not found", operationID)
+	return stellar.Operation{}
 }
 
 type mockKVStore struct {
@@ -423,6 +479,23 @@ func TestStellarGetBlock_FetchesTransactionDetailsLazily(t *testing.T) {
 									{Destination: "GCLAIMANT"},
 								},
 							},
+							{
+								ID:                    "op-claim",
+								PagingToken:           "op-claim",
+								Type:                  "claim_claimable_balance",
+								TransactionHash:       "tx-claim",
+								TransactionSuccessful: true,
+								BalanceID:             "balance-2",
+								Claimant:              "GCLAIMANT",
+							},
+							{
+								ID:                    "op-clawback",
+								PagingToken:           "op-clawback",
+								Type:                  "clawback_claimable_balance",
+								TransactionHash:       "tx-clawback",
+								TransactionSuccessful: true,
+								BalanceID:             "balance-3",
+							},
 						},
 					},
 				},
@@ -445,6 +518,40 @@ func TestStellarGetBlock_FetchesTransactionDetailsLazily(t *testing.T) {
 					},
 				},
 			},
+			"op-claim": {
+				"": {
+					Embedded: struct {
+						Records []stellar.Effect `json:"records"`
+					}{
+						Records: []stellar.Effect{
+							{
+								Type:      "claimable_balance_claimed",
+								Account:   "GCLAIMANT",
+								BalanceID: "balance-2",
+								Asset:     "USD:GISSUER",
+								Amount:    "4.2500000",
+							},
+						},
+					},
+				},
+			},
+			"op-clawback": {
+				"": {
+					Embedded: struct {
+						Records []stellar.Effect `json:"records"`
+					}{
+						Records: []stellar.Effect{
+							{
+								Type:      "claimable_balance_clawed_back",
+								Account:   "GCLAIMANT",
+								BalanceID: "balance-3",
+								Asset:     "USD:GISSUER",
+								Amount:    "1.7500000",
+							},
+						},
+					},
+				},
+			},
 		},
 		transactions: map[string]*stellar.Transaction{
 			"tx-pay": {
@@ -458,6 +565,20 @@ func TestStellarGetBlock_FetchesTransactionDetailsLazily(t *testing.T) {
 				Hash:       "tx-create",
 				Successful: true,
 				FeeCharged: "200",
+				Ledger:     20,
+				CreatedAt:  "2026-03-18T11:00:02Z",
+			},
+			"tx-claim": {
+				Hash:       "tx-claim",
+				Successful: true,
+				FeeCharged: "210",
+				Ledger:     20,
+				CreatedAt:  "2026-03-18T11:00:02Z",
+			},
+			"tx-clawback": {
+				Hash:       "tx-clawback",
+				Successful: true,
+				FeeCharged: "220",
 				Ledger:     20,
 				CreatedAt:  "2026-03-18T11:00:02Z",
 			},
@@ -501,8 +622,19 @@ func TestStellarGetBlock_FetchesTransactionDetailsLazily(t *testing.T) {
 
 	assert.Equal(t, 1, api.txCalls["tx-pay"])
 	assert.Equal(t, 1, api.txCalls["tx-create"])
+	assert.Equal(t, 1, api.txCalls["tx-claim"])
+	assert.Equal(t, 1, api.txCalls["tx-clawback"])
 	assert.Zero(t, api.txCalls["tx-ignored"])
 	assert.Equal(t, 1, api.effectCalls["op-create"])
+	assert.Equal(t, 1, api.effectCalls["op-claim"])
+	assert.Zero(t, api.effectCalls["op-clawback"])
+
+	claimTx := block.Transactions[2]
+	assert.Empty(t, claimTx.FromAddress)
+	assert.Equal(t, "GCLAIMANT", claimTx.ToAddress)
+	assert.Equal(t, "GISSUER:USD", claimTx.AssetAddress)
+	assert.Equal(t, "4.2500000", claimTx.Amount)
+	assert.Equal(t, "claim_claimable_balance", claimTx.GetMetadataString(types.MetadataKeySubtype))
 }
 
 func TestFetchStellarLedgerPayments_PaginatesWithoutDuplication(t *testing.T) {
@@ -714,16 +846,9 @@ func TestStellarConvertOperation_CreateClaimableBalancePersistsState(t *testing.
 		123,
 	)
 	require.NoError(t, err)
-	require.True(t, ok)
-	assert.Equal(t, "GFUNDER", tx.FromAddress)
-	assert.Equal(t, stellarClaimableBalanceAddress("balance-1"), tx.ToAddress)
-	assert.Equal(t, "GISSUER:USDC", tx.AssetAddress)
-	assert.Equal(t, "11.5000000", tx.Amount)
-	assert.Equal(t, constant.TxTypeTokenTransfer, tx.Type)
-	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
-	assert.Equal(t, "create_claimable_balance", subtype)
-	balanceID := tx.GetMetadataString(types.MetadataKeyClaimableID)
-	assert.Equal(t, "balance-1", balanceID)
+	assert.False(t, ok)
+	assert.Empty(t, tx.FromAddress)
+	assert.Empty(t, tx.ToAddress)
 
 	var state stellarClaimableBalanceState
 	found, err := kv.GetAny(idx.claimableBalanceStateKey("balance-1"), &state)
@@ -733,6 +858,50 @@ func TestStellarConvertOperation_CreateClaimableBalancePersistsState(t *testing.
 	assert.Equal(t, "11.5000000", state.Amount)
 	assert.Equal(t, "GFUNDER", state.SourceAccount)
 	assert.Equal(t, []string{"GCLAIM"}, state.Claimants)
+}
+
+func TestStellarConvertOperation_CreateClaimableBalanceEmitsSourceDebitWhenTwoWayIndexed(t *testing.T) {
+	t.Parallel()
+
+	kv := newMockKVStore()
+	idx := NewStellarIndexer(
+		"stellar_mainnet",
+		config.ChainConfig{NetworkId: "stellar_mainnet", TwoWayIndexing: true},
+		nil,
+		kv,
+		mockStellarPubkeyStore{addresses: map[string]struct{}{"GFUNDER": {}}},
+	)
+
+	tx, ok, err := idx.convertOperation(
+		stellar.Operation{
+			ID:                    "201",
+			PagingToken:           "201",
+			Type:                  "create_claimable_balance",
+			TransactionHash:       "tx-create-balance",
+			TransactionSuccessful: true,
+			SourceAccount:         "GFUNDER",
+			Asset:                 "USDC:GISSUER",
+			Amount:                "11.5000000",
+			Claimants:             []stellar.Claimant{{Destination: "GCLAIM"}},
+		},
+		[]stellar.Effect{
+			{Type: "claimable_balance_created", BalanceID: "balance-1"},
+		},
+		&stellar.Transaction{FeeCharged: "100"},
+		77,
+		"ledger-hash",
+		"201",
+		123,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "GFUNDER", tx.FromAddress)
+	assert.Empty(t, tx.ToAddress)
+	assert.Equal(t, "GISSUER:USDC", tx.AssetAddress)
+	assert.Equal(t, "11.5000000", tx.Amount)
+	assert.Equal(t, constant.TxTypeTokenTransfer, tx.Type)
+	assert.Equal(t, "create_claimable_balance", tx.GetMetadataString(types.MetadataKeySubtype))
+	assert.Equal(t, "balance-1", tx.GetMetadataString(types.MetadataKeyClaimableID))
 }
 
 func TestStellarConvertOperation_ClaimClaimableBalanceConsumesState(t *testing.T) {
@@ -772,7 +941,7 @@ func TestStellarConvertOperation_ClaimClaimableBalanceConsumesState(t *testing.T
 	)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, stellarClaimableBalanceAddress("balance-2"), tx.FromAddress)
+	assert.Empty(t, tx.FromAddress)
 	assert.Equal(t, "GCLAIM", tx.ToAddress)
 	assert.Equal(t, "GISSUER:USDC", tx.AssetAddress)
 	assert.Equal(t, "7.0000000", tx.Amount)
@@ -819,15 +988,230 @@ func TestStellarConvertOperation_ClawbackClaimableBalanceConsumesState(t *testin
 		123,
 	)
 	require.NoError(t, err)
-	require.True(t, ok)
-	assert.Equal(t, stellarClaimableBalanceAddress("balance-3"), tx.FromAddress)
-	assert.Equal(t, stellarBurnAddress, tx.ToAddress)
-	assert.Equal(t, "GISSUER:USDC", tx.AssetAddress)
-	assert.Equal(t, "3.5000000", tx.Amount)
-	assert.Equal(t, constant.TxTypeTokenTransfer, tx.Type)
+	assert.False(t, ok)
+	assert.Empty(t, tx.FromAddress)
+	assert.Empty(t, tx.ToAddress)
 
 	var state stellarClaimableBalanceState
 	found, err := kv.GetAny(idx.claimableBalanceStateKey("balance-3"), &state)
 	require.NoError(t, err)
 	assert.False(t, found)
+}
+
+func TestStellarMainnetFetchAndParseTransactions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	type stellarRealTxCase struct {
+		name          string
+		kind          string
+		txHash        string
+		operationID   string
+		transferIndex string
+		wantType      constant.TxType
+		wantFrom      string
+		wantTo        string
+		wantAmount    string
+		wantMetadata  map[string]string
+		beforeConvert func(t *testing.T, idx *StellarIndexer, operation stellar.Operation, effects []stellar.Effect)
+		verify        func(t *testing.T, tx types.Transaction, idx *StellarIndexer, payment *stellar.Payment, operation *stellar.Operation, effects []stellar.Effect)
+	}
+
+	testCases := []stellarRealTxCase{
+		{
+			name:          "create account",
+			kind:          "payment",
+			txHash:        "981290ff3d4707fbb0413fd2e3aab41c359e19e626dcc3dfce5a88fc424937c6",
+			transferIndex: "265348783263514625",
+			wantType:      constant.TxTypeNativeTransfer,
+			wantFrom:      "GDNHPXSFIZQMJJFBAFWUWG3442AHGI3WEWUYRYXIGMJRHDUQOPHTKLDC",
+			wantTo:        "GBMB4C3RRTYWQZNTRZGKD4Z4OLMVRJZPFCQUY6UIRUACG7FLCYHAEGPN",
+			wantAmount:    "1.5000000",
+		},
+		{
+			name:          "payment",
+			kind:          "payment",
+			txHash:        "4003ae37c7b5126c364e6890a64792f57b268e1bebb43546e0347ba113d16530",
+			transferIndex: "265336753060651009",
+			wantType:      constant.TxTypeTokenTransfer,
+			wantFrom:      "GAMV73I2KDYWDLGO5SNVL5IA6JSGLCALD7XJSXHPUB27MMJNTDQIX3UC",
+			wantTo:        "GBN32NH6TMWE4ZD4G245CF3UVOQRXD4FK3FDCLZ4DE5642HWFKSLLRMB",
+			wantAmount:    "56.6500000",
+			verify: func(t *testing.T, tx types.Transaction, _ *StellarIndexer, payment *stellar.Payment, _ *stellar.Operation, _ []stellar.Effect) {
+				require.NotNil(t, payment)
+				assert.Equal(t, formatStellarAsset(payment.AssetIssuer, payment.AssetCode), tx.AssetAddress)
+			},
+		},
+		{
+			name:          "path payment strict send",
+			kind:          "payment",
+			txHash:        "9eeb46b6a608dde3985d1dd9d4110f030a6902c7ea0586de0d51cf52ce055b2c",
+			transferIndex: "265348641529663489",
+			wantType:      constant.TxTypeTokenTransfer,
+			wantFrom:      "GBOA3PJZ3EUWLWLNXPICD57STTQSQKGEKDXNXC2VVPTML7SCQMAYUO3G",
+			wantTo:        "GBOA3PJZ3EUWLWLNXPICD57STTQSQKGEKDXNXC2VVPTML7SCQMAYUO3G",
+			wantAmount:    "1.9175151",
+			verify: func(t *testing.T, tx types.Transaction, _ *StellarIndexer, payment *stellar.Payment, _ *stellar.Operation, _ []stellar.Effect) {
+				require.NotNil(t, payment)
+				assert.Equal(t, "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN:USDC", tx.AssetAddress)
+			},
+		},
+		{
+			name:          "create claimable balance",
+			kind:          "operation",
+			txHash:        "2308f9725aafde7aa6249e10abb1ccd3218116c6ee8d56305977db1cdc30319f",
+			operationID:   "265336628506390529",
+			transferIndex: "265336628506390529",
+			wantType:      constant.TxTypeTokenTransfer,
+			wantFrom:      "GCKIK5UOKKGXCDCWGY3BAKJ2T5H6BXOXHI4SMMEUSUE6NWLJP3F2KQUU",
+			wantTo:        "",
+			wantAmount:    "0.0010000",
+			wantMetadata: map[string]string{
+				types.MetadataKeySubtype:     "create_claimable_balance",
+				types.MetadataKeyClaimableID: "000000009289e60febbca7863b48b8cf4d68b514d779ef13d1078b2fcd6d9371b0c3647a",
+			},
+			verify: func(t *testing.T, tx types.Transaction, idx *StellarIndexer, _ *stellar.Payment, operation *stellar.Operation, _ []stellar.Effect) {
+				require.NotNil(t, operation)
+				assert.Equal(t, "GBZH36ATUXJZKFRMQTAAW42MWNM34SOA4N6E7DQ62V3G5NVITC3QOVRL:OVRL", tx.AssetAddress)
+
+				state, found, err := idx.loadClaimableBalanceState("000000009289e60febbca7863b48b8cf4d68b514d779ef13d1078b2fcd6d9371b0c3647a")
+				require.NoError(t, err)
+				require.True(t, found)
+				assert.Equal(t, operation.Asset, state.Asset)
+				assert.Equal(t, operation.Amount, state.Amount)
+				assert.Equal(t, operation.SourceAccount, state.SourceAccount)
+				assert.Equal(t, stellarClaimantAddresses(operation.Claimants), state.Claimants)
+			},
+		},
+		{
+			name:          "claim claimable balance",
+			kind:          "operation",
+			txHash:        "eaef80df07081e46288947f6e286f25c09ff552ab861b5f90a2cdfbd1976e880",
+			operationID:   "265334914814349334",
+			transferIndex: "265334914814349334",
+			wantType:      constant.TxTypeTokenTransfer,
+			wantFrom:      "",
+			wantTo:        "GCKIK5UOKKGXCDCWGY3BAKJ2T5H6BXOXHI4SMMEUSUE6NWLJP3F2KQUU",
+			wantMetadata: map[string]string{
+				types.MetadataKeySubtype:     "claim_claimable_balance",
+				types.MetadataKeyClaimableID: "0000000022b1a16b0a8d5aa67f932dc7a4f28f0ae44b7b270af4fce16a02362eea7e3897",
+			},
+			beforeConvert: func(t *testing.T, idx *StellarIndexer, operation stellar.Operation, effects []stellar.Effect) {
+				effect := findStellarEffect(effects, "claimable_balance_claimed")
+				require.NotNil(t, effect)
+				require.NoError(t, idx.saveClaimableBalanceState("0000000022b1a16b0a8d5aa67f932dc7a4f28f0ae44b7b270af4fce16a02362eea7e3897", stellarClaimableBalanceState{
+					Asset:         effect.Asset,
+					Amount:        effect.Amount,
+					SourceAccount: operation.Claimant,
+					Claimants:     []string{operation.Claimant},
+				}))
+			},
+			verify: func(t *testing.T, tx types.Transaction, idx *StellarIndexer, _ *stellar.Payment, _ *stellar.Operation, effects []stellar.Effect) {
+				effect := findStellarEffect(effects, "claimable_balance_claimed")
+				require.NotNil(t, effect)
+				assert.Equal(t, effect.Amount, tx.Amount)
+				assert.Equal(t, "GBZH36ATUXJZKFRMQTAAW42MWNM34SOA4N6E7DQ62V3G5NVITC3QOVRL:OVRL", tx.AssetAddress)
+
+				_, found, err := idx.loadClaimableBalanceState("0000000022b1a16b0a8d5aa67f932dc7a4f28f0ae44b7b270af4fce16a02362eea7e3897")
+				require.NoError(t, err)
+				assert.False(t, found)
+			},
+		},
+	}
+
+	enabled := false
+	for _, tc := range testCases {
+		if tc.txHash != "" && tc.transferIndex != "" {
+			enabled = true
+			break
+		}
+	}
+	if !enabled {
+		t.Skip("hardcoded real mainnet test cases are empty")
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		if tc.txHash == "" || tc.transferIndex == "" {
+			continue
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			kvstore := newMockKVStore()
+			idx, client := newTestStellarLiveIndexer(t, kvstore)
+
+			txDetail, err := client.GetTransaction(ctx, tc.txHash)
+			require.NoError(t, err, "should fetch real mainnet transaction %s", tc.txHash)
+			require.NotNil(t, txDetail)
+
+			ledger, err := client.GetLedger(ctx, txDetail.Ledger)
+			require.NoError(t, err, "should fetch real mainnet ledger %d", txDetail.Ledger)
+			require.NotNil(t, ledger)
+
+			ledgerTimestamp, err := parseRFC3339Unix(ledger.ClosedAt)
+			require.NoError(t, err)
+
+			var (
+				tx        types.Transaction
+				ok        bool
+				payment   *stellar.Payment
+				operation *stellar.Operation
+				effects   []stellar.Effect
+			)
+
+			switch tc.kind {
+			case "payment":
+				payments, err := fetchStellarLedgerPayments(ctx, client, txDetail.Ledger)
+				require.NoError(t, err)
+				p := findStellarPayment(t, payments, tc.transferIndex)
+				payment = &p
+				tx, ok = idx.convertPayment(p, txDetail, ledger.Sequence, ledger.Hash, tc.transferIndex, ledgerTimestamp)
+				require.True(t, ok)
+			case "operation":
+				operations, err := fetchStellarLedgerOperations(ctx, client, txDetail.Ledger)
+				require.NoError(t, err)
+				op := findStellarOperation(t, operations, tc.operationID)
+				require.Equal(t, tc.transferIndex, op.PagingToken)
+				operation = &op
+
+				effects, err = fetchStellarOperationEffects(ctx, client, tc.operationID)
+				require.NoError(t, err)
+
+				if tc.beforeConvert != nil {
+					tc.beforeConvert(t, idx, op, effects)
+				}
+
+				tx, ok, err = idx.convertOperation(op, effects, txDetail, ledger.Sequence, ledger.Hash, tc.transferIndex, ledgerTimestamp)
+				require.NoError(t, err)
+				require.True(t, ok)
+			default:
+				t.Fatalf("unsupported stellar mainnet test kind %q", tc.kind)
+			}
+
+			require.NotEmpty(t, tx.TxHash)
+			require.NotEmpty(t, tx.Type)
+
+			assert.Equal(t, tc.txHash, tx.TxHash)
+			assert.Equal(t, tc.wantFrom, tx.FromAddress)
+			assert.Equal(t, tc.wantTo, tx.ToAddress)
+			if tc.wantAmount != "" {
+				assert.Equal(t, tc.wantAmount, tx.Amount)
+			}
+			assert.Equal(t, tc.wantType, tx.Type)
+			assert.Equal(t, ledger.Hash, tx.BlockHash)
+			assert.Equal(t, tc.transferIndex, tx.TransferIndex)
+
+			for key, want := range tc.wantMetadata {
+				assert.Equal(t, want, tx.GetMetadataString(key), "metadata %s", key)
+			}
+
+			if tc.verify != nil {
+				tc.verify(t, tx, idx, payment, operation, effects)
+			}
+		})
+	}
 }

@@ -33,21 +33,26 @@ func NewClient(
 }
 
 func (c *Client) GetLatestLedgerIndex(ctx context.Context) (uint64, error) {
-	resp, err := c.CallRPC(ctx, "ledger_current", nil)
+	// Use validated ledger head (server_info), not ledger_current (open/in-progress ledger).
+	resp, err := c.CallRPC(ctx, "server_info", []any{map[string]any{}})
 	if err != nil {
-		return 0, fmt.Errorf("ledger_current failed: %w", err)
+		return 0, fmt.Errorf("server_info failed: %w", err)
 	}
 
 	var result struct {
-		LedgerCurrentIndex uint64 `json:"ledger_current_index"`
+		Info struct {
+			ValidatedLedger struct {
+				Seq uint64 `json:"seq"`
+			} `json:"validated_ledger"`
+		} `json:"info"`
 	}
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		return 0, fmt.Errorf("decode ledger_current result: %w", err)
+		return 0, fmt.Errorf("decode server_info result: %w", err)
 	}
-	if result.LedgerCurrentIndex == 0 {
-		return 0, fmt.Errorf("ledger_current returned empty ledger_current_index")
+	if result.Info.ValidatedLedger.Seq == 0 {
+		return 0, fmt.Errorf("server_info returned empty validated_ledger.seq")
 	}
-	return result.LedgerCurrentIndex, nil
+	return result.Info.ValidatedLedger.Seq, nil
 }
 
 func (c *Client) GetLedgerByIndex(ctx context.Context, ledgerIndex uint64) (*Ledger, error) {
