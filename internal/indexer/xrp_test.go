@@ -127,8 +127,7 @@ func TestXRPConvertLedger_ParsesNativeAndIssuedPayments(t *testing.T) {
 	assert.Equal(t, "", nativeTx.AssetAddress)
 	assert.Equal(t, "LEDGER_HASH", nativeTx.BlockHash)
 	assert.Equal(t, "0", nativeTx.TransferIndex)
-	destinationTagValue, ok := nativeTx.GetMetadataString(types.MetadataKeyDestinationTag)
-	require.True(t, ok)
+	destinationTagValue := nativeTx.GetMetadataString(types.MetadataKeyDestinationTag)
 	assert.Equal(t, "778899", destinationTagValue)
 	assert.Equal(t, "0.000012", nativeTx.TxFee.String())
 
@@ -240,11 +239,9 @@ func TestXRPConvertLedger_ParsesAccountDelete(t *testing.T) {
 	assert.Equal(t, "rDest", tx.ToAddress)
 	assert.Equal(t, "5", tx.Amount)
 	assert.Equal(t, constant.TxTypeNativeTransfer, tx.Type)
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, "account_delete", subtype)
-	tag, ok := tx.GetMetadataString(types.MetadataKeyDestinationTag)
-	require.True(t, ok)
+	tag := tx.GetMetadataString(types.MetadataKeyDestinationTag)
 	assert.Equal(t, "42", tag)
 }
 
@@ -304,14 +301,11 @@ func TestXRPConvertLedger_ParsesCheckCashIssuedAsset(t *testing.T) {
 	assert.Equal(t, "5.20", tx.Amount)
 	assert.Equal(t, "rIssuer:USD", tx.AssetAddress)
 	assert.Equal(t, constant.TxTypeTokenTransfer, tx.Type)
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, "check_cash", subtype)
-	checkID, ok := tx.GetMetadataString(types.MetadataKeyCheckID)
-	require.True(t, ok)
+	checkID := tx.GetMetadataString(types.MetadataKeyCheckID)
 	assert.Equal(t, "CHECK1", checkID)
-	tag, ok := tx.GetMetadataString(types.MetadataKeyDestinationTag)
-	require.True(t, ok)
+	tag := tx.GetMetadataString(types.MetadataKeyDestinationTag)
 	assert.Equal(t, "778899", tag)
 }
 
@@ -367,17 +361,13 @@ func TestXRPConvertLedger_ParsesEscrowFinish(t *testing.T) {
 	assert.Equal(t, "rDest", tx.ToAddress)
 	assert.Equal(t, "2.5", tx.Amount)
 	assert.Equal(t, constant.TxTypeNativeTransfer, tx.Type)
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, "escrow_finish", subtype)
-	escrowOwner, ok := tx.GetMetadataString(types.MetadataKeyEscrowOwner)
-	require.True(t, ok)
+	escrowOwner := tx.GetMetadataString(types.MetadataKeyEscrowOwner)
 	assert.Equal(t, "rOwner", escrowOwner)
-	escrowSequence, ok := tx.GetMetadataString(types.MetadataKeyEscrowSequence)
-	require.True(t, ok)
+	escrowSequence := tx.GetMetadataString(types.MetadataKeyEscrowSequence)
 	assert.Equal(t, "7", escrowSequence)
-	tag, ok := tx.GetMetadataString(types.MetadataKeyDestinationTag)
-	require.True(t, ok)
+	tag := tx.GetMetadataString(types.MetadataKeyDestinationTag)
 	assert.Equal(t, "12", tag)
 }
 
@@ -422,8 +412,7 @@ func TestXRPConvertLedger_ParsesClawback(t *testing.T) {
 	assert.Equal(t, "rIssuer:USD", tx.AssetAddress)
 	assert.Equal(t, "5.20", tx.Amount)
 	assert.Equal(t, constant.TxTypeTokenTransfer, tx.Type)
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, "clawback", subtype)
 }
 

@@ -314,11 +314,9 @@ func TestStellarGetBlock_ParsesNativeAndIssuedPaymentsWithMemo(t *testing.T) {
 	assert.Equal(t, "", nativeTx.AssetAddress)
 	assert.Equal(t, "LEDGER_HASH", nativeTx.BlockHash)
 	assert.Equal(t, "pt1", nativeTx.TransferIndex)
-	memo, ok := nativeTx.GetMetadataString(types.MetadataKeyMemo)
-	require.True(t, ok)
+	memo := nativeTx.GetMetadataString(types.MetadataKeyMemo)
 	assert.Equal(t, "memo-1", memo)
-	memoType, ok := nativeTx.GetMetadataString(types.MetadataKeyMemoType)
-	require.True(t, ok)
+	memoType := nativeTx.GetMetadataString(types.MetadataKeyMemoType)
 	assert.Equal(t, "text", memoType)
 	assert.Equal(t, "0.00001", nativeTx.TxFee.String())
 
@@ -327,8 +325,7 @@ func TestStellarGetBlock_ParsesNativeAndIssuedPaymentsWithMemo(t *testing.T) {
 	assert.Equal(t, "GISSUER:USDC", tokenTx.AssetAddress)
 	assert.Equal(t, "LEDGER_HASH", tokenTx.BlockHash)
 	assert.Equal(t, "pt2", tokenTx.TransferIndex)
-	memo, ok = tokenTx.GetMetadataString(types.MetadataKeyMemo)
-	require.True(t, ok)
+	memo = tokenTx.GetMetadataString(types.MetadataKeyMemo)
 	assert.Equal(t, "memo-2", memo)
 	assert.Equal(t, "99.2500000", tokenTx.Amount)
 
@@ -347,8 +344,7 @@ func TestStellarGetBlock_ParsesNativeAndIssuedPaymentsWithMemo(t *testing.T) {
 	assert.Equal(t, "GPATHFROM", pathTx.FromAddress)
 	assert.Equal(t, "GDEST", pathTx.ToAddress)
 	assert.Equal(t, "7.1250000", pathTx.Amount)
-	memo, ok = pathTx.GetMetadataString(types.MetadataKeyMemo)
-	require.True(t, ok)
+	memo = pathTx.GetMetadataString(types.MetadataKeyMemo)
 	assert.Equal(t, "memo-3", memo)
 	assert.Equal(t, "0.00003", pathTx.TxFee.String())
 }
@@ -679,8 +675,7 @@ func TestStellarConvertOperation_ClawbackUsesBurnAddress(t *testing.T) {
 	assert.Equal(t, constant.TxTypeTokenTransfer, tx.Type)
 	assert.Equal(t, "ledger-hash", tx.BlockHash)
 	assert.Equal(t, "10", tx.TransferIndex)
-	subtype, exists := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, exists)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, "clawback", subtype)
 }
 
@@ -725,11 +720,9 @@ func TestStellarConvertOperation_CreateClaimableBalancePersistsState(t *testing.
 	assert.Equal(t, "GISSUER:USDC", tx.AssetAddress)
 	assert.Equal(t, "11.5000000", tx.Amount)
 	assert.Equal(t, constant.TxTypeTokenTransfer, tx.Type)
-	subtype, exists := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, exists)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, "create_claimable_balance", subtype)
-	balanceID, exists := tx.GetMetadataString(types.MetadataKeyClaimableID)
-	require.True(t, exists)
+	balanceID := tx.GetMetadataString(types.MetadataKeyClaimableID)
 	assert.Equal(t, "balance-1", balanceID)
 
 	var state stellarClaimableBalanceState

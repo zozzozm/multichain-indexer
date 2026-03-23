@@ -136,12 +136,10 @@ func TestXRPMainnetAccountDeleteIntegration(t *testing.T) {
 	assert.Equal(t, block.Hash, tx.BlockHash)
 	assert.Equal(t, findXRPLedgerTransactionIndex(t, ledger, txHash), tx.TransferIndex)
 
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, expectedSubtype, subtype)
 
-	destinationTag, ok := tx.GetMetadataString(types.MetadataKeyDestinationTag)
-	require.True(t, ok)
+	destinationTag := tx.GetMetadataString(types.MetadataKeyDestinationTag)
 	assert.Equal(t, expectedDestinationTag, destinationTag)
 }
 
@@ -179,12 +177,10 @@ func TestXRPMainnetCheckCashIntegration(t *testing.T) {
 	assert.Equal(t, block.Hash, tx.BlockHash)
 	assert.Equal(t, findXRPLedgerTransactionIndex(t, ledger, txHash), tx.TransferIndex)
 
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, expectedSubtype, subtype)
 
-	checkID, ok := tx.GetMetadataString(types.MetadataKeyCheckID)
-	require.True(t, ok)
+	checkID := tx.GetMetadataString(types.MetadataKeyCheckID)
 	assert.Equal(t, expectedCheckID, checkID)
 }
 
@@ -223,7 +219,6 @@ func TestXRPMainnetClawbackIntegration(t *testing.T) {
 	assert.Equal(t, block.Hash, tx.BlockHash)
 	assert.Equal(t, findXRPLedgerTransactionIndex(t, ledger, txHash), tx.TransferIndex)
 
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, expectedSubtype, subtype)
 }

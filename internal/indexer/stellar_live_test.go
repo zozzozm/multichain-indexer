@@ -186,12 +186,10 @@ func TestStellarMainnetCreateClaimableBalanceIntegration(t *testing.T) {
 	assert.Equal(t, ledger.Hash, tx.BlockHash)
 	assert.Equal(t, transferIndex, tx.TransferIndex)
 
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, expectedSubtype, subtype)
 
-	claimableID, ok := tx.GetMetadataString(types.MetadataKeyClaimableID)
-	require.True(t, ok)
+	claimableID := tx.GetMetadataString(types.MetadataKeyClaimableID)
 	assert.Equal(t, expectedBalanceID, claimableID)
 
 	state, found, err := idx.loadClaimableBalanceState(expectedBalanceID)
@@ -274,12 +272,10 @@ func TestStellarMainnetClaimClaimableBalanceIntegration(t *testing.T) {
 	assert.Equal(t, ledger.Hash, tx.BlockHash)
 	assert.Equal(t, transferIndex, tx.TransferIndex)
 
-	subtype, ok := tx.GetMetadataString(types.MetadataKeySubtype)
-	require.True(t, ok)
+	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, expectedSubtype, subtype)
 
-	claimableID, ok := tx.GetMetadataString(types.MetadataKeyClaimableID)
-	require.True(t, ok)
+	claimableID := tx.GetMetadataString(types.MetadataKeyClaimableID)
 	assert.Equal(t, expectedBalanceID, claimableID)
 
 	_, found, err := idx.loadClaimableBalanceState(expectedBalanceID)
