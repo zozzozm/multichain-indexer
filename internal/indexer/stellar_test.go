@@ -374,7 +374,7 @@ func TestStellarGetBlock_ParsesNativeAndIssuedPaymentsWithMemo(t *testing.T) {
 	memo := nativeTx.Memo
 	assert.Equal(t, "memo-1", memo)
 	memoType := nativeTx.MemoType
-	assert.Equal(t, "text", memoType)
+	assert.Equal(t, types.MemoTypeText, memoType)
 	assert.Equal(t, "0.00001", nativeTx.TxFee.String())
 
 	tokenTx := block.Transactions[1]
@@ -1094,7 +1094,7 @@ func TestStellarMainnetFetchAndParseTransactions(t *testing.T) {
 				require.NotNil(t, payment)
 				assert.Equal(t, formatStellarAsset(payment.AssetIssuer, payment.AssetCode), tx.AssetAddress)
 				assert.Equal(t, "pspb:4441859", tx.Memo)
-				assert.Equal(t, "text", tx.MemoType)
+				assert.Equal(t, types.MemoTypeText, tx.MemoType)
 			},
 		},
 		{
@@ -1348,6 +1348,6 @@ func TestStellarMainnetBatchPaymentProducesMultipleTransactions(t *testing.T) {
 	for _, tx := range converted {
 		assert.Equal(t, batchTxHash, tx.TxHash)
 		assert.Equal(t, "pspb:4441859", tx.Memo)
-		assert.Equal(t, "text", tx.MemoType)
+		assert.Equal(t, types.MemoTypeText, tx.MemoType)
 	}
 }

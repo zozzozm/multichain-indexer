@@ -428,11 +428,11 @@ func (s *StellarIndexer) convertPayment(
 
 	fee := decimal.Zero
 	memo := ""
-	memoType := ""
+	var memoType types.MemoType
 	if txDetail != nil {
 		fee = stroopsToXLM(strings.TrimSpace(txDetail.FeeCharged))
 		memo = strings.TrimSpace(txDetail.Memo)
-		memoType = strings.TrimSpace(txDetail.MemoType)
+		memoType = types.MemoType(strings.TrimSpace(txDetail.MemoType))
 	}
 
 	tx := types.Transaction{
@@ -700,7 +700,7 @@ func (s *StellarIndexer) newOperationTransaction(
 			tx.Memo = memo
 		}
 		if memoType := strings.TrimSpace(txDetail.MemoType); memoType != "" {
-			tx.MemoType = memoType
+			tx.MemoType = types.MemoType(memoType)
 		}
 	}
 	return tx

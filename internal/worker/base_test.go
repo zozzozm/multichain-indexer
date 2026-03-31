@@ -196,7 +196,7 @@ func TestBaseWorkerEmitBlock_AppliesNativeOutgoingOverrides(t *testing.T) {
 				Amount:        "5.0000000",
 				Type:          constant.TxTypeTokenTransfer,
 				AssetAddress:  "GISSUER:USDC",
-				MemoType:      "text",
+				MemoType:      types.MemoTypeText,
 				Metadata: map[string]any{
 					testSourceTypeKey:         string(constant.TxTypeNativeTransfer),
 					testSourceAmountKey:       "7.5000000",
@@ -217,7 +217,7 @@ func TestBaseWorkerEmitBlock_AppliesNativeOutgoingOverrides(t *testing.T) {
 	if outTx.Type != constant.TxTypeNativeTransfer || outTx.Amount != "7.5000000" || outTx.AssetAddress != "" {
 		t.Fatalf("outgoing native override should clear receiver-side asset, got type=%s amount=%s asset=%s", outTx.Type, outTx.Amount, outTx.AssetAddress)
 	}
-	if outTx.MemoType != "text" {
+	if outTx.MemoType != types.MemoTypeText {
 		t.Fatalf("outgoing tx should preserve unrelated metadata")
 	}
 	if outTx.GetMetadataString(testSourceTypeKey) != "" || outTx.GetMetadataString(testSourceAmountKey) != "" || outTx.GetMetadataString(testSourceAssetKey) != "" {

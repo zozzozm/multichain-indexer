@@ -11,6 +11,26 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// MemoType represents a chain-specific memo type.
+//
+// For Stellar this maps to the underlying XDR memo type:
+// - "none"   -> MEMO_NONE
+// - "text"   -> MEMO_TEXT
+// - "id"     -> MEMO_ID
+// - "hash"   -> MEMO_HASH
+// - "return" -> MEMO_RETURN (32-byte refund hash)
+//
+// Other chains may reuse these values or leave MemoType empty.
+type MemoType string
+
+const (
+	MemoTypeNone   MemoType = "none"
+	MemoTypeText   MemoType = "text"
+	MemoTypeID     MemoType = "id"
+	MemoTypeHash   MemoType = "hash"
+	MemoTypeReturn MemoType = "return"
+)
+
 type Block struct {
 	Number       uint64                 `json:"number"`
 	Hash         string                 `json:"hash"`
@@ -60,7 +80,7 @@ type Transaction struct {
 	Direction      string          `json:"direction"`     // "in" (deposit) or "out" (withdrawal)
 	DestinationTag string          `json:"destinationTag,omitempty"`
 	Memo           string          `json:"memo,omitempty"`
-	MemoType       string          `json:"memoType,omitempty"`
+	MemoType       MemoType        `json:"memoType,omitempty"`
 	Metadata       map[string]any  `json:"metadata,omitempty"`
 }
 
@@ -192,7 +212,7 @@ func (t Transaction) Hash() string {
 			builder.WriteByte('|')
 			builder.WriteString(memo)
 		}
-		if memoType := strings.TrimSpace(t.MemoType); memoType != "" {
+		if memoType := strings.TrimSpace(string(t.MemoType)); memoType != "" {
 			builder.WriteByte('|')
 			builder.WriteString(memoType)
 		}
