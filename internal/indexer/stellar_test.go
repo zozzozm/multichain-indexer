@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -370,9 +371,9 @@ func TestStellarGetBlock_ParsesNativeAndIssuedPaymentsWithMemo(t *testing.T) {
 	assert.Equal(t, "", nativeTx.AssetAddress)
 	assert.Equal(t, "LEDGER_HASH", nativeTx.BlockHash)
 	assert.Equal(t, "pt1", nativeTx.TransferIndex)
-	memo := nativeTx.GetMetadataString(types.MetadataKeyMemo)
+	memo := nativeTx.Memo
 	assert.Equal(t, "memo-1", memo)
-	memoType := nativeTx.GetMetadataString(types.MetadataKeyMemoType)
+	memoType := nativeTx.MemoType
 	assert.Equal(t, "text", memoType)
 	assert.Equal(t, "0.00001", nativeTx.TxFee.String())
 
@@ -381,7 +382,7 @@ func TestStellarGetBlock_ParsesNativeAndIssuedPaymentsWithMemo(t *testing.T) {
 	assert.Equal(t, "GISSUER:USDC", tokenTx.AssetAddress)
 	assert.Equal(t, "LEDGER_HASH", tokenTx.BlockHash)
 	assert.Equal(t, "pt2", tokenTx.TransferIndex)
-	memo = tokenTx.GetMetadataString(types.MetadataKeyMemo)
+	memo = tokenTx.Memo
 	assert.Equal(t, "memo-2", memo)
 	assert.Equal(t, "99.2500000", tokenTx.Amount)
 
@@ -400,7 +401,7 @@ func TestStellarGetBlock_ParsesNativeAndIssuedPaymentsWithMemo(t *testing.T) {
 	assert.Equal(t, "GPATHFROM", pathTx.FromAddress)
 	assert.Equal(t, "GDEST", pathTx.ToAddress)
 	assert.Equal(t, "7.1250000", pathTx.Amount)
-	memo = pathTx.GetMetadataString(types.MetadataKeyMemo)
+	memo = pathTx.Memo
 	assert.Equal(t, "memo-3", memo)
 	assert.Equal(t, "0.00003", pathTx.TxFee.String())
 }
@@ -1081,6 +1082,22 @@ func TestStellarMainnetFetchAndParseTransactions(t *testing.T) {
 			},
 		},
 		{
+			name:          "payment with memo",
+			kind:          "payment",
+			txHash:        "5701567d4bcabbf54b43a084c0fc0b9fc544358d6b2aa70603ab0e6a9a8c2f81",
+			transferIndex: "265854060396396545",
+			wantType:      constant.TxTypeTokenTransfer,
+			wantFrom:      "GBN32NH6TMWE4ZD4G245CF3UVOQRXD4FK3FDCLZ4DE5642HWFKSLLRMB",
+			wantTo:        "GBKZQ2BYMOEJESIERVLWVSZD7CNNB7U2IMDCCWPDUN46AQAAXY3Y7I3C",
+			wantAmount:    "18.8900000",
+			verify: func(t *testing.T, tx types.Transaction, _ *StellarIndexer, payment *stellar.Payment, _ *stellar.Operation, _ []stellar.Effect) {
+				require.NotNil(t, payment)
+				assert.Equal(t, formatStellarAsset(payment.AssetIssuer, payment.AssetCode), tx.AssetAddress)
+				assert.Equal(t, "pspb:4441859", tx.Memo)
+				assert.Equal(t, "text", tx.MemoType)
+			},
+		},
+		{
 			name:          "create account",
 			kind:          "payment",
 			txHash:        "981290ff3d4707fbb0413fd2e3aab41c359e19e626dcc3dfce5a88fc424937c6",
@@ -1274,5 +1291,63 @@ func TestStellarMainnetFetchAndParseTransactions(t *testing.T) {
 				tc.verify(t, tx, idx, payment, operation, effects)
 			}
 		})
+	}
+}
+
+func TestStellarMainnetBatchPaymentProducesMultipleTransactions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	const batchTxHash = "5701567d4bcabbf54b43a084c0fc0b9fc544358d6b2aa70603ab0e6a9a8c2f81"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	idx, client := newTestStellarLiveIndexer(t, newMockKVStore())
+
+	txDetail, err := client.GetTransaction(ctx, batchTxHash)
+	require.NoError(t, err)
+	require.NotNil(t, txDetail)
+
+	ledger, err := client.GetLedger(ctx, txDetail.Ledger)
+	require.NoError(t, err)
+	require.NotNil(t, ledger)
+
+	ledgerTimestamp, err := parseRFC3339Unix(ledger.ClosedAt)
+	require.NoError(t, err)
+
+	payments, err := fetchStellarLedgerPayments(ctx, client, txDetail.Ledger)
+	require.NoError(t, err)
+
+	converted := make([]types.Transaction, 0)
+	toSet := make(map[string]struct{})
+	transferIndexSet := make(map[string]struct{})
+	for _, payment := range payments {
+		if !strings.EqualFold(strings.TrimSpace(payment.TransactionHash), batchTxHash) {
+			continue
+		}
+		transferIndex := strings.TrimSpace(payment.PagingToken)
+		tx, ok := idx.convertPayment(payment, txDetail, ledger.Sequence, ledger.Hash, transferIndex, ledgerTimestamp)
+		if !ok {
+			continue
+		}
+		converted = append(converted, tx)
+		if tx.ToAddress != "" {
+			toSet[tx.ToAddress] = struct{}{}
+		}
+		if tx.TransferIndex != "" {
+			transferIndexSet[tx.TransferIndex] = struct{}{}
+		}
+	}
+
+	require.Greater(t, len(converted), 1, "batch tx should emit multiple transfers")
+	require.Greater(t, len(toSet), 1, "batch tx should include multiple destination addresses")
+	assert.Len(t, transferIndexSet, len(converted), "each emitted transfer should have unique transferIndex")
+
+	for _, tx := range converted {
+		assert.Equal(t, batchTxHash, tx.TxHash)
+		assert.Equal(t, "pspb:4441859", tx.Memo)
+		assert.Equal(t, "text", tx.MemoType)
 	}
 }

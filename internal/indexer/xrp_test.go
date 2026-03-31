@@ -183,7 +183,7 @@ func TestXRPConvertLedger_ParsesNativeAndIssuedPayments(t *testing.T) {
 	assert.Equal(t, "", nativeTx.AssetAddress)
 	assert.Equal(t, "LEDGER_HASH", nativeTx.BlockHash)
 	assert.Equal(t, "0", nativeTx.TransferIndex)
-	destinationTagValue := nativeTx.GetMetadataString(types.MetadataKeyDestinationTag)
+	destinationTagValue := nativeTx.DestinationTag
 	assert.Equal(t, "778899", destinationTagValue)
 	assert.Equal(t, "0.000012", nativeTx.TxFee.String())
 
@@ -371,7 +371,7 @@ func TestXRPConvertLedger_ParsesAccountDelete(t *testing.T) {
 	assert.Equal(t, constant.TxTypeNativeTransfer, tx.Type)
 	subtype := tx.GetMetadataString(types.MetadataKeySubtype)
 	assert.Equal(t, "account_delete", subtype)
-	tag := tx.GetMetadataString(types.MetadataKeyDestinationTag)
+	tag := tx.DestinationTag
 	assert.Equal(t, "42", tag)
 }
 
@@ -435,7 +435,7 @@ func TestXRPConvertLedger_ParsesCheckCashIssuedAsset(t *testing.T) {
 	assert.Equal(t, "check_cash", subtype)
 	checkID := tx.GetMetadataString(types.MetadataKeyCheckID)
 	assert.Equal(t, "CHECK1", checkID)
-	tag := tx.GetMetadataString(types.MetadataKeyDestinationTag)
+	tag := tx.DestinationTag
 	assert.Equal(t, "778899", tag)
 }
 
@@ -497,7 +497,7 @@ func TestXRPConvertLedger_ParsesEscrowFinish(t *testing.T) {
 	assert.Equal(t, "rOwner", escrowOwner)
 	escrowSequence := tx.GetMetadataString(types.MetadataKeyEscrowSequence)
 	assert.Equal(t, "7", escrowSequence)
-	tag := tx.GetMetadataString(types.MetadataKeyDestinationTag)
+	tag := tx.DestinationTag
 	assert.Equal(t, "12", tag)
 }
 
@@ -595,18 +595,20 @@ func TestXRPMainnetFetchAndParseTransactions(t *testing.T) {
 		wantTo       string
 		wantAmount   string
 		wantAsset    string
+		wantDestinationTag string
 		wantMetadata map[string]string
 	}
 
 	testCases := []xrpRealTxCase{
 		{
-			name:        "native payment",
-			ledgerIndex: 103056832,
-			txHash:      "030944CC6EFC5193312C41A635D9E5CE67B982ABCE3625238F7D91472C60D55C",
+			name:        "native payment with destination tag",
+			ledgerIndex: 103233614,
+			txHash:      "F13A325DF5544E7E6F17108B18D0E8198EC161EE26E66345E09E346F154BDD17",
 			wantType:    constant.TxTypeNativeTransfer,
-			wantFrom:    "rJrFQCQKgUJwG6bnDLyX33ea4DwWcjk6P3",
-			wantTo:      "rpW6DG5zYZrgvQvo2paEQaM4TqWQ86EGbS",
-			wantAmount:  "1.803482",
+			wantFrom:    "rMgUZD9LBBrsSLXmAe2naCAWGtTg5KmsT1",
+			wantTo:      "rvEBMEWUUcKNMvXhxzo6Db1pFdrgfi34B",
+			wantAmount:  "8.999987",
+			wantDestinationTag: "1862722728",
 		},
 		{
 			name:        "issued payment",
@@ -626,9 +628,9 @@ func TestXRPMainnetFetchAndParseTransactions(t *testing.T) {
 			wantFrom:    "rauksASXjkCF13cpjDGA1DCgWWRm4arJu4",
 			wantTo:      "rMkJJ4HHHBRdeHvE2UXx1xPDh4hnuRW9TZ",
 			wantAmount:  "0.899292",
+			wantDestinationTag: "1717742333",
 			wantMetadata: map[string]string{
-				types.MetadataKeySubtype:        "account_delete",
-				types.MetadataKeyDestinationTag: "1717742333",
+				types.MetadataKeySubtype: "account_delete",
 			},
 		},
 		{
@@ -718,6 +720,7 @@ func TestXRPMainnetFetchAndParseTransactions(t *testing.T) {
 			assert.Equal(t, tc.wantType, tx.Type)
 			assert.Equal(t, block.Hash, tx.BlockHash)
 			assert.Equal(t, findXRPLedgerTransactionIndex(t, ledger, tc.txHash), tx.TransferIndex)
+			assert.Equal(t, tc.wantDestinationTag, tx.DestinationTag)
 
 			for key, want := range tc.wantMetadata {
 				assert.Equal(t, want, tx.GetMetadataString(key), "metadata %s", key)

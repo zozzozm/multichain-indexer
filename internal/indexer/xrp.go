@@ -319,7 +319,7 @@ func (x *XRPIndexer) convertPaymentTransaction(
 			result.SetMetadata(metadataKeySourceAsset, sourceAssetAddress)
 		}
 	}
-	setMetadataString(&result, types.MetadataKeyDestinationTag, formatDestinationTag(tx.DestinationTag))
+	result.DestinationTag = strings.TrimSpace(formatDestinationTag(tx.DestinationTag))
 	return result, true
 }
 
@@ -351,7 +351,7 @@ func (x *XRPIndexer) convertAccountDeleteTransaction(
 	result.Amount = amount
 	result.Type = constant.TxTypeNativeTransfer
 	setMetadataString(&result, types.MetadataKeySubtype, "account_delete")
-	setMetadataString(&result, types.MetadataKeyDestinationTag, formatDestinationTag(tx.DestinationTag))
+	result.DestinationTag = strings.TrimSpace(formatDestinationTag(tx.DestinationTag))
 	return result, true
 }
 
@@ -397,7 +397,7 @@ func (x *XRPIndexer) convertCheckCashTransaction(
 	result.Type = txType
 	setMetadataString(&result, types.MetadataKeySubtype, "check_cash")
 	setMetadataString(&result, types.MetadataKeyCheckID, strings.TrimSpace(tx.CheckID))
-	setMetadataString(&result, types.MetadataKeyDestinationTag, formatDestinationTag(fields.DestinationTag))
+	result.DestinationTag = strings.TrimSpace(formatDestinationTag(fields.DestinationTag))
 	return result, true
 }
 
@@ -450,7 +450,7 @@ func (x *XRPIndexer) convertEscrowFinishTransaction(
 	setMetadataString(&result, types.MetadataKeySubtype, "escrow_finish")
 	setMetadataString(&result, types.MetadataKeyEscrowOwner, owner)
 	setMetadataString(&result, types.MetadataKeyEscrowSequence, offerSequence)
-	setMetadataString(&result, types.MetadataKeyDestinationTag, formatDestinationTag(fields.DestinationTag))
+	result.DestinationTag = strings.TrimSpace(formatDestinationTag(fields.DestinationTag))
 	return result, true
 }
 

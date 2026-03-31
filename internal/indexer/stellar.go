@@ -22,7 +22,6 @@ const (
 	stellarOperationsPageLimit        = 200
 	stellarEffectsPageLimit           = 200
 	stellarBurnAddress                = "stellar:burn"
-	stellarClaimableBalancePrefix     = "stellar:claimable_balance:"
 	stellarClaimableBalanceStateScope = "stellar_claimable_balance"
 )
 
@@ -386,41 +385,6 @@ func (s *StellarIndexer) getCachedOperationEffects(
 	return effects, nil
 }
 
-func (s *StellarIndexer) fetchTransactionDetails(
-	ctx context.Context,
-	payments []stellar.Payment,
-	operations []stellar.Operation,
-) (map[string]*stellar.Transaction, error) {
-	hashes := make(map[string]struct{})
-	for _, payment := range payments {
-		hash := strings.TrimSpace(payment.TransactionHash)
-		if hash != "" {
-			hashes[hash] = struct{}{}
-		}
-	}
-	for _, operation := range operations {
-		hash := strings.TrimSpace(operation.TransactionHash)
-		if hash != "" {
-			hashes[hash] = struct{}{}
-		}
-	}
-
-	txByHash := make(map[string]*stellar.Transaction, len(hashes))
-	for hash := range hashes {
-		var txDetail *stellar.Transaction
-		err := s.failover.ExecuteWithRetry(ctx, func(client stellar.StellarAPI) error {
-			tx, err := client.GetTransaction(ctx, hash)
-			txDetail = tx
-			return err
-		})
-		if err != nil {
-			return nil, fmt.Errorf("get stellar transaction %s failed: %w", hash, err)
-		}
-		txByHash[hash] = txDetail
-	}
-	return txByHash, nil
-}
-
 func (s *StellarIndexer) convertPayment(
 	payment stellar.Payment,
 	txDetail *stellar.Transaction,
@@ -487,12 +451,8 @@ func (s *StellarIndexer) convertPayment(
 		Confirmations: 1,
 		Status:        types.StatusConfirmed,
 	}
-	if memo != "" {
-		tx.SetMetadata(types.MetadataKeyMemo, memo)
-	}
-	if memoType != "" {
-		tx.SetMetadata(types.MetadataKeyMemoType, memoType)
-	}
+	tx.Memo = memo
+	tx.MemoType = memoType
 	if sourceType, sourceAssetAddress, sourceAmount, ok := stellarSourcePaymentDetails(payment); ok {
 		tx.SetMetadata(metadataKeySourceTxType, string(sourceType))
 		tx.SetMetadata(metadataKeySourceAmount, sourceAmount)
@@ -533,7 +493,7 @@ func (s *StellarIndexer) convertOperation(
 	case "claim_claimable_balance":
 		return s.convertClaimClaimableBalanceOperation(operation, effects, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
 	case "clawback_claimable_balance":
-		return s.convertClawbackClaimableBalanceOperation(operation, effects, txDetail, ledgerSequence, blockHash, transferIndex, ledgerTimestamp)
+		return s.convertClawbackClaimableBalanceOperation(operation)
 	default:
 		return types.Transaction{}, false, nil
 	}
@@ -661,10 +621,6 @@ func (s *StellarIndexer) convertClaimClaimableBalanceOperation(
 	}
 
 	claimant := normalizeStellarAddress(operation.Claimant)
-	if claimant != "" {
-		state.Claimants = []string{claimant}
-	}
-
 	if claimant == "" || !s.isMonitoredAddress(claimant) {
 		return types.Transaction{}, false, nil
 	}
@@ -685,14 +641,7 @@ func (s *StellarIndexer) convertClaimClaimableBalanceOperation(
 }
 
 func (s *StellarIndexer) convertClawbackClaimableBalanceOperation(
-	operation stellar.Operation,
-	effects []stellar.Effect,
-	txDetail *stellar.Transaction,
-	ledgerSequence uint64,
-	blockHash string,
-	transferIndex string,
-	ledgerTimestamp uint64,
-) (types.Transaction, bool, error) {
+	operation stellar.Operation) (types.Transaction, bool, error) {
 	balanceID := strings.TrimSpace(operation.BalanceID)
 	if balanceID == "" {
 		return types.Transaction{}, false, nil
@@ -748,38 +697,13 @@ func (s *StellarIndexer) newOperationTransaction(
 	}
 	if txDetail != nil {
 		if memo := strings.TrimSpace(txDetail.Memo); memo != "" {
-			tx.SetMetadata(types.MetadataKeyMemo, memo)
+			tx.Memo = memo
 		}
 		if memoType := strings.TrimSpace(txDetail.MemoType); memoType != "" {
-			tx.SetMetadata(types.MetadataKeyMemoType, memoType)
+			tx.MemoType = memoType
 		}
 	}
 	return tx
-}
-
-func (s *StellarIndexer) fetchEffectsForOperations(ctx context.Context, operations []stellar.Operation) (map[string][]stellar.Effect, error) {
-	effectsByOperation := make(map[string][]stellar.Effect)
-	for _, operation := range operations {
-		if !stellarOperationNeedsEffects(operation.Type) {
-			continue
-		}
-		operationID := strings.TrimSpace(operation.ID)
-		if operationID == "" {
-			continue
-		}
-
-		var effects []stellar.Effect
-		err := s.failover.ExecuteWithRetry(ctx, func(client stellar.StellarAPI) error {
-			var err error
-			effects, err = fetchStellarOperationEffects(ctx, client, operationID)
-			return err
-		})
-		if err != nil {
-			return nil, fmt.Errorf("get stellar effects for operation %s failed: %w", operationID, err)
-		}
-		effectsByOperation[operationID] = effects
-	}
-	return effectsByOperation, nil
 }
 
 func (s *StellarIndexer) saveClaimableBalanceState(balanceID string, state stellarClaimableBalanceState) error {
@@ -817,18 +741,6 @@ func (s *StellarIndexer) isMonitoredAddress(address string) bool {
 	return address != "" && s.pubkeyStore.Exist(enum.NetworkTypeStellar, address)
 }
 
-func (s *StellarIndexer) anyMonitoredAddress(addresses []string) bool {
-	if s.pubkeyStore == nil {
-		return true
-	}
-	for _, address := range addresses {
-		if s.isMonitoredAddress(address) {
-			return true
-		}
-	}
-	return false
-}
-
 func stellarAssetFromOperation(asset string) (constant.TxType, string, bool) {
 	asset = strings.TrimSpace(asset)
 	if asset == "" {
@@ -858,10 +770,6 @@ func stellarClaimantAddresses(claimants []stellar.Claimant) []string {
 		addresses = append(addresses, address)
 	}
 	return addresses
-}
-
-func stellarClaimableBalanceAddress(balanceID string) string {
-	return stellarClaimableBalancePrefix + strings.TrimSpace(balanceID)
 }
 
 func findStellarEffect(effects []stellar.Effect, effectType string) *stellar.Effect {

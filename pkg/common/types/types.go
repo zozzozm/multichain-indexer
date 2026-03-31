@@ -42,23 +42,26 @@ const (
 )
 
 type Transaction struct {
-	TxHash        string          `json:"txHash"`
-	NetworkId     string          `json:"networkId"`
-	BlockNumber   uint64          `json:"blockNumber"`   // 0 for mempool transactions
-	BlockHash     string          `json:"blockHash"`     // block hash for reorg-aware idempotency
-	TransferIndex string          `json:"transferIndex"` // stable position or operation id when the chain can provide one
-	FromAddress   string          `json:"fromAddress"`
-	FromAddresses []string        `json:"fromAddresses,omitempty"`
-	ToAddress     string          `json:"toAddress"`
-	AssetAddress  string          `json:"assetAddress"`
-	Amount        string          `json:"amount"`
-	Type          constant.TxType `json:"type"`
-	TxFee         decimal.Decimal `json:"txFee"`
-	Timestamp     uint64          `json:"timestamp"`
-	Confirmations uint64          `json:"confirmations"` // Number of confirmations (0 = mempool/unconfirmed)
-	Status        string          `json:"status"`        // "pending" (0 conf), "confirmed" (1+ conf)
-	Direction     string          `json:"direction"`     // "in" (deposit) or "out" (withdrawal)
-	Metadata      map[string]any  `json:"metadata,omitempty"`
+	TxHash         string          `json:"txHash"`
+	NetworkId      string          `json:"networkId"`
+	BlockNumber    uint64          `json:"blockNumber"`   // 0 for mempool transactions
+	BlockHash      string          `json:"blockHash"`     // block hash for reorg-aware idempotency
+	TransferIndex  string          `json:"transferIndex"` // stable position or operation id when the chain can provide one
+	FromAddress    string          `json:"fromAddress"`
+	FromAddresses  []string        `json:"fromAddresses,omitempty"`
+	ToAddress      string          `json:"toAddress"`
+	AssetAddress   string          `json:"assetAddress"`
+	Amount         string          `json:"amount"`
+	Type           constant.TxType `json:"type"`
+	TxFee          decimal.Decimal `json:"txFee"`
+	Timestamp      uint64          `json:"timestamp"`
+	Confirmations  uint64          `json:"confirmations"` // Number of confirmations (0 = mempool/unconfirmed)
+	Status         string          `json:"status"`        // "pending" (0 conf), "confirmed" (1+ conf)
+	Direction      string          `json:"direction"`     // "in" (deposit) or "out" (withdrawal)
+	DestinationTag string          `json:"destinationTag,omitempty"`
+	Memo           string          `json:"memo,omitempty"`
+	MemoType       string          `json:"memoType,omitempty"`
+	Metadata       map[string]any  `json:"metadata,omitempty"`
 }
 
 func (t *Transaction) SetMetadata(key string, value any) {
@@ -181,15 +184,15 @@ func (t Transaction) Hash() string {
 		builder.WriteString(strconv.FormatUint(t.Timestamp, 10))
 		builder.WriteByte('|')
 		builder.WriteString(t.Direction)
-		if destinationTag := t.GetMetadataString(MetadataKeyDestinationTag); destinationTag != "" {
+		if destinationTag := strings.TrimSpace(t.DestinationTag); destinationTag != "" {
 			builder.WriteByte('|')
 			builder.WriteString(destinationTag)
 		}
-		if memo := t.GetMetadataString(MetadataKeyMemo); memo != "" {
+		if memo := strings.TrimSpace(t.Memo); memo != "" {
 			builder.WriteByte('|')
 			builder.WriteString(memo)
 		}
-		if memoType := t.GetMetadataString(MetadataKeyMemoType); memoType != "" {
+		if memoType := strings.TrimSpace(t.MemoType); memoType != "" {
 			builder.WriteByte('|')
 			builder.WriteString(memoType)
 		}
