@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"time"
 
@@ -218,15 +219,16 @@ func (bw *BaseWorker) emitBlock(block *types.Block) {
 		if toMonitored {
 			inTx := tx
 			inTx.Direction = types.DirectionIn
+			inTx = normalizeTransactionForDirection(bw.chain, inTx, types.DirectionIn)
 			bw.logger.Info("Emitting matched transaction",
 				"direction", types.DirectionIn,
-				"from", tx.FromAddress,
-				"to", tx.ToAddress,
+				"from", inTx.FromAddress,
+				"to", inTx.ToAddress,
 				"chain", bw.chain.GetName(),
-				"type", tx.Type,
-				"txhash", tx.TxHash,
-				"status", tx.Status,
-				"confirmations", tx.Confirmations,
+				"type", inTx.Type,
+				"txhash", inTx.TxHash,
+				"status", inTx.Status,
+				"confirmations", inTx.Confirmations,
 			)
 			_ = bw.emitter.EmitTransaction(bw.chain.GetName(), &inTx)
 		}
@@ -234,21 +236,45 @@ func (bw *BaseWorker) emitBlock(block *types.Block) {
 		if fromMonitored {
 			outTx := tx
 			outTx.Direction = types.DirectionOut
+			outTx = normalizeTransactionForDirection(bw.chain, outTx, types.DirectionOut)
 			bw.logger.Info("Emitting matched transaction",
 				"direction", types.DirectionOut,
-				"from", tx.FromAddress,
-				"to", tx.ToAddress,
+				"from", outTx.FromAddress,
+				"to", outTx.ToAddress,
 				"chain", bw.chain.GetName(),
-				"type", tx.Type,
-				"txhash", tx.TxHash,
-				"status", tx.Status,
-				"confirmations", tx.Confirmations,
+				"type", outTx.Type,
+				"txhash", outTx.TxHash,
+				"status", outTx.Status,
+				"confirmations", outTx.Confirmations,
 			)
 			_ = bw.emitter.EmitTransaction(bw.chain.GetName(), &outTx)
 		}
 	}
 
 	bw.emitUTXOs(block)
+}
+
+func normalizeTransactionForDirection(
+	chain indexer.Indexer,
+	tx types.Transaction,
+	direction string,
+) types.Transaction {
+	tx = cloneTransactionMetadata(tx)
+	if normalizer, ok := chain.(indexer.DirectionalNormalizer); ok {
+		return normalizer.NormalizeForDirection(tx, direction)
+	}
+	return tx
+}
+
+func cloneTransactionMetadata(tx types.Transaction) types.Transaction {
+	if len(tx.Metadata) == 0 {
+		return tx
+	}
+
+	cloned := make(map[string]any, len(tx.Metadata))
+	maps.Copy(cloned, tx.Metadata)
+	tx.Metadata = cloned
+	return tx
 }
 
 // emitUTXOs emits UTXO events for monitored addresses.

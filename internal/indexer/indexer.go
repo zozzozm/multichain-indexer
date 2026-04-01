@@ -19,3 +19,11 @@ type Indexer interface {
 	GetBlocksByNumbers(ctx context.Context, blockNumbers []uint64) ([]BlockResult, error)
 	IsHealthy() bool
 }
+
+// DirectionalNormalizer is an optional hook for chains whose outgoing wallet
+// view differs from the incoming payload of the same routed transfer
+// (for example, path/cross-asset payments). It must not change from/to-based
+// routing decisions; it only shapes the emitted transaction payload.
+type DirectionalNormalizer interface {
+	NormalizeForDirection(tx types.Transaction, direction string) types.Transaction
+}

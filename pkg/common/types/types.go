@@ -11,6 +11,26 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// MemoType represents a chain-specific memo type.
+//
+// For Stellar this maps to the underlying XDR memo type:
+// - "none"   -> MEMO_NONE
+// - "text"   -> MEMO_TEXT
+// - "id"     -> MEMO_ID
+// - "hash"   -> MEMO_HASH
+// - "return" -> MEMO_RETURN (32-byte refund hash)
+//
+// Other chains may reuse these values or leave MemoType empty.
+type MemoType string
+
+const (
+	MemoTypeNone   MemoType = "none"
+	MemoTypeText   MemoType = "text"
+	MemoTypeID     MemoType = "id"
+	MemoTypeHash   MemoType = "hash"
+	MemoTypeReturn MemoType = "return"
+)
+
 type Block struct {
 	Number       uint64                 `json:"number"`
 	Hash         string                 `json:"hash"`
@@ -42,23 +62,26 @@ const (
 )
 
 type Transaction struct {
-	TxHash        string          `json:"txHash"`
-	NetworkId     string          `json:"networkId"`
-	BlockNumber   uint64          `json:"blockNumber"` // 0 for mempool transactions
-	BlockHash     string          `json:"blockHash"`     // block hash for reorg-aware idempotency
-	TransferIndex string          `json:"transferIndex"` // unique position within tx (EVM only)
-	FromAddress   string          `json:"fromAddress"`
-	FromAddresses []string        `json:"fromAddresses,omitempty"`
-	ToAddress     string          `json:"toAddress"`
-	AssetAddress  string          `json:"assetAddress"`
-	Amount        string          `json:"amount"`
-	Type          constant.TxType `json:"type"`
-	TxFee         decimal.Decimal `json:"txFee"`
-	Timestamp     uint64          `json:"timestamp"`
-	Confirmations uint64          `json:"confirmations"` // Number of confirmations (0 = mempool/unconfirmed)
-	Status        string          `json:"status"`        // "pending" (0 conf), "confirmed" (1+ conf)
-	Direction     string          `json:"direction"`     // "in" (deposit) or "out" (withdrawal)
-	Metadata      map[string]any  `json:"metadata,omitempty"`
+	TxHash         string          `json:"txHash"`
+	NetworkId      string          `json:"networkId"`
+	BlockNumber    uint64          `json:"blockNumber"`   // 0 for mempool transactions
+	BlockHash      string          `json:"blockHash"`     // block hash for reorg-aware idempotency
+	TransferIndex  string          `json:"transferIndex"` // stable position or operation id when the chain can provide one
+	FromAddress    string          `json:"fromAddress"`
+	FromAddresses  []string        `json:"fromAddresses,omitempty"`
+	ToAddress      string          `json:"toAddress"`
+	AssetAddress   string          `json:"assetAddress"`
+	Amount         string          `json:"amount"`
+	Type           constant.TxType `json:"type"`
+	TxFee          decimal.Decimal `json:"txFee"`
+	Timestamp      uint64          `json:"timestamp"`
+	Confirmations  uint64          `json:"confirmations"` // Number of confirmations (0 = mempool/unconfirmed)
+	Status         string          `json:"status"`        // "pending" (0 conf), "confirmed" (1+ conf)
+	Direction      string          `json:"direction"`     // "in" (deposit) or "out" (withdrawal)
+	DestinationTag string          `json:"destinationTag,omitempty"`
+	Memo           string          `json:"memo,omitempty"`
+	MemoType       MemoType        `json:"memoType,omitempty"`
+	Metadata       map[string]any  `json:"metadata,omitempty"`
 }
 
 func (t *Transaction) SetMetadata(key string, value any) {
@@ -105,6 +128,18 @@ func (t Transaction) AllSenderAddresses() []string {
 	return nil
 }
 
+const (
+	MetadataKeyDestinationTag = "destination_tag"
+	MetadataKeyMemo           = "memo"
+	MetadataKeyMemoType       = "memo_type"
+	MetadataKeySubtype        = "subtype"
+	MetadataKeyCheckID        = "check_id"
+	MetadataKeyEscrowOwner    = "escrow_owner"
+	MetadataKeyEscrowSequence = "escrow_sequence"
+	MetadataKeyClaimableID    = "claimable_balance_id"
+	MetadataKeyClaimants      = "claimant_addresses"
+)
+
 func (t Transaction) MarshalBinary() ([]byte, error) {
 	bytes, err := json.Marshal(t)
 	if err != nil {
@@ -138,7 +173,7 @@ func (t Transaction) String() string {
 
 // Hash generates a deterministic hash used as the NATS idempotency key (Event Instance Identity).
 //
-// When TransferIndex is set (EVM): NetworkId|TxHash|BlockHash|TransferIndex|Direction
+// When TransferIndex is set: NetworkId|TxHash|BlockHash|TransferIndex|Direction
 // When TransferIndex is empty (non-EVM fallback): NetworkId|TxHash|BlockHash|From|To|Timestamp|Direction
 //
 // BlockHash ensures reorgs produce new hashes so consumers get updated data.
@@ -153,8 +188,8 @@ func (t Transaction) Hash() string {
 	builder.WriteByte('|')
 
 	if t.TransferIndex != "" {
-		// EVM (or any chain that populates TransferIndex):
-		// Exact positional identity — reorg-aware via BlockHash.
+		// Chains that populate TransferIndex get exact positional identity,
+		// still reorg-aware via BlockHash.
 		builder.WriteString(t.TransferIndex)
 		builder.WriteByte('|')
 		builder.WriteString(t.Direction)
@@ -169,6 +204,18 @@ func (t Transaction) Hash() string {
 		builder.WriteString(strconv.FormatUint(t.Timestamp, 10))
 		builder.WriteByte('|')
 		builder.WriteString(t.Direction)
+		if destinationTag := strings.TrimSpace(t.DestinationTag); destinationTag != "" {
+			builder.WriteByte('|')
+			builder.WriteString(destinationTag)
+		}
+		if memo := strings.TrimSpace(t.Memo); memo != "" {
+			builder.WriteByte('|')
+			builder.WriteString(memo)
+		}
+		if memoType := strings.TrimSpace(string(t.MemoType)); memoType != "" {
+			builder.WriteByte('|')
+			builder.WriteString(memoType)
+		}
 	}
 
 	hash := sha256.Sum256([]byte(builder.String()))
