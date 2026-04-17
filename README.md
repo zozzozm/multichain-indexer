@@ -22,7 +22,7 @@ A production-ready indexer that parses every on-chain transaction, matches desti
 
 ## Key Features
 
-- **12+ Chains** — Ethereum, BSC, TRON, Polygon, Arbitrum, Optimism, Bitcoin, Solana, Aptos, Sui, Cosmos, TON
+- **14+ Chains** — Ethereum, BSC, TRON, Polygon, Arbitrum, Optimism, Bitcoin, Solana, Aptos, Sui, Cosmos, TON, XRP, Stellar
 - **Real-time + Historical** — Four cooperating workers cover live blocks, gap backfill, failed retries, and manual rescans
 - **Bloom Filter Matching** — Sub-millisecond address lookups against millions of addresses with near-zero memory overhead
 - **NATS JetStream Events** — Matched transactions streamed instantly for downstream processing
@@ -101,7 +101,7 @@ flowchart TB
 | Historical backfill | Built-in (catchup + manual workers) | Re-index subgraph | Limited | Manual |
 | Latency | Block time (~1-12s) | Minutes (indexing delay) | Seconds | Block time |
 | Cost | Infra only | Hosted fees or infra | Per-event pricing | Infra only |
-| Non-EVM support | BTC, SOL, TRON, Aptos, Sui, Cosmos, TON | EVM only | EVM only | Per-chain effort |
+| Non-EVM support | BTC, SOL, TRON, Aptos, Sui, Cosmos, TON, XRP, Stellar | EVM only | EVM only | Per-chain effort |
 
 ## Supported Chains
 
@@ -114,11 +114,13 @@ flowchart TB
 | Optimism | EVM | Stable |
 | TRON | TRON | Stable |
 | Bitcoin | UTXO | Stable |
-| Solana | SVM | Stable |
-| Aptos | Move | Stable |
-| Sui | Move | Stable |
-| Cosmos (Hub, Osmosis, Celestia) | Cosmos | Stable |
-| TON | TON | Stable |
+| Solana | SVM | Beta |
+| Aptos | Move | Beta |
+| Sui | Move | Beta |
+| Cosmos (Hub, Osmosis, Celestia) | Cosmos | Beta |
+| TON | TON | Beta |
+| XRP | XRP Ledger | Beta |
+| Stellar | Stellar | Beta |
 
 ---
 
