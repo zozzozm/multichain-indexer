@@ -114,11 +114,11 @@ flowchart TB
 | Optimism | EVM | Stable |
 | TRON | TRON | Stable |
 | Bitcoin | UTXO | Stable |
-| Solana | SVM | Stable |
-| Aptos | Move | Stable |
-| Sui | Move | Stable |
-| Cosmos (Hub, Osmosis, Celestia) | Cosmos | Stable |
-| TON | TON | Stable |
+| Solana | SVM | Beta |
+| Aptos | Move | Beta |
+| Sui | Move | Beta |
+| Cosmos (Hub, Osmosis, Celestia) | Cosmos | Beta |
+| TON | TON | Beta |
 
 ---
 
