@@ -119,6 +119,8 @@ flowchart TB
 | Sui | Move | Beta |
 | Cosmos (Hub, Osmosis, Celestia) | Cosmos | Beta |
 | TON | TON | Beta |
+| XRP | XRP Ledger | Beta |
+| Stellar | Stellar | Beta |
 
 ---
 
