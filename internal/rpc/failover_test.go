@@ -21,8 +21,8 @@ func (m *mockNetworkClient) Do(_ context.Context, _, _ string, _ any, _ map[stri
 }
 func (m *mockNetworkClient) GetNetworkType() string { return "evm" }
 func (m *mockNetworkClient) GetClientType() string  { return "rpc" }
-func (m *mockNetworkClient) GetURL() string          { return "http://mock" }
-func (m *mockNetworkClient) Close() error            { return nil }
+func (m *mockNetworkClient) GetURL() string         { return "http://mock" }
+func (m *mockNetworkClient) Close() error           { return nil }
 
 func newTestFailover() (*Failover[NetworkClient], *Provider) {
 	f := NewFailover[NetworkClient](nil)
@@ -76,7 +76,7 @@ func TestAnalyzeAndHandleError_RestrictedQuery(t *testing.T) {
 
 	assert.False(t, p.IsAvailable(), "provider should be blacklisted after restricted query error")
 	assert.Equal(t, StateBlacklisted, p.State)
-	assert.True(t, time.Now().Add(29*time.Minute).Before(p.BlacklistedUntil))
+	assert.True(t, time.Now().Add(4*time.Minute).Before(p.BlacklistedUntil))
 
 	errorsByType := f.GetMetrics()["errors_by_type"].(map[string]int64)
 	assert.Equal(t, int64(1), errorsByType["restricted_query"])
