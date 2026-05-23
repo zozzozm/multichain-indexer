@@ -68,6 +68,20 @@ func TestAnalyzeAndHandleError_RateLimit(t *testing.T) {
 	assert.Equal(t, int64(1), errorsByType["rate_limit"])
 }
 
+func TestAnalyzeAndHandleError_RestrictedQuery(t *testing.T) {
+	f, p := newTestFailover()
+
+	err := fmt.Errorf("rpc error: RPC error -32701: Please specify an address in your request or, to remove restrictions, order a dedicated full node here: https://www.allnodes.com/eth/host")
+	f.AnalyzeAndHandleError(p, err, 100*time.Millisecond)
+
+	assert.False(t, p.IsAvailable(), "provider should be blacklisted after restricted query error")
+	assert.Equal(t, StateBlacklisted, p.State)
+	assert.True(t, time.Now().Add(29*time.Minute).Before(p.BlacklistedUntil))
+
+	errorsByType := f.GetMetrics()["errors_by_type"].(map[string]int64)
+	assert.Equal(t, int64(1), errorsByType["restricted_query"])
+}
+
 func TestAnalyzeAndHandleError_ConnectionError(t *testing.T) {
 	f, p := newTestFailover()
 

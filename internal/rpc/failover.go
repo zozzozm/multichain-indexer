@@ -621,6 +621,16 @@ func (f *Failover[T]) analyzeError(err error, elapsed time.Duration) ProviderIss
 			markUnhealthy: true,
 		},
 		{
+			patterns: []string{
+				"please specify an address",
+				"remove restrictions",
+				"order a dedicated full node",
+			},
+			reason:        "restricted_query",
+			cooldown:      5 * time.Minute,
+			markUnhealthy: true,
+		},
+		{
 			patterns:      []string{"timeout", "deadline"},
 			reason:        "timeout",
 			cooldown:      3 * time.Minute,
