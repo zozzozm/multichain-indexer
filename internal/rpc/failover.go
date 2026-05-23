@@ -622,6 +622,10 @@ func (f *Failover[T]) analyzeError(err error, elapsed time.Duration) ProviderIss
 		},
 		{
 			patterns: []string{
+				"-32701",
+				"-32603",
+				"-32612",
+				"-32613",
 				"please specify an address",
 				"remove restrictions",
 				"order a dedicated full node",
