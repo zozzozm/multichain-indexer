@@ -143,6 +143,9 @@ func TestAnalyzeAndHandleError_GenericError(t *testing.T) {
 	metrics := f.GetMetrics()
 	assert.Equal(t, int64(1), metrics["total_requests"])
 	assert.Equal(t, int64(1), metrics["failed_requests"])
+	errorsByType := metrics["errors_by_type"].(map[string]int64)
+	assert.Equal(t, int64(1), errorsByType["generic_error"])
+	assert.Equal(t, int64(1), errorsByType["unknown_error_type"])
 }
 
 func TestRecordSuccess(t *testing.T) {
@@ -209,6 +212,7 @@ func TestExecuteCore_GenericErrorsForceRotateToHealthySibling(t *testing.T) {
 	metrics := f.GetMetrics()
 	errorsByType := metrics["errors_by_type"].(map[string]int64)
 	assert.Equal(t, int64(cfg.ForceRotateThreshold), errorsByType["generic_error"])
+	assert.Equal(t, int64(cfg.ForceRotateThreshold), errorsByType["unknown_error_type"])
 	assert.Equal(t, int64(1), metrics["provider_switches"])
 }
 

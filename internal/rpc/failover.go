@@ -399,6 +399,10 @@ func (f *Failover[T]) executeCore(ctx context.Context, provider *Provider, fn fu
 		f.metrics.IncrementFailure()
 		issue := f.analyzeError(err, elapsed)
 		f.metrics.IncrementErrorType(issue.Reason)
+		if issue.Reason == "generic_error" {
+			logger.Warn("Unknown provider error type", "provider", provider.Name, "error", issue.Detail)
+			f.metrics.IncrementErrorType("unknown_error_type")
+		}
 
 		if issue.MarkUnhealthy {
 			f.handleUnhealthyProvider(provider, issue)
@@ -703,6 +707,10 @@ func (f *Failover[T]) AnalyzeAndHandleError(provider *Provider, err error, elaps
 
 	issue := f.analyzeError(err, elapsed)
 	f.metrics.IncrementErrorType(issue.Reason)
+	if issue.Reason == "generic_error" {
+		logger.Warn("Unknown provider error type", "provider", provider.Name, "error", issue.Detail)
+		f.metrics.IncrementErrorType("unknown_error_type")
+	}
 
 	if issue.MarkUnhealthy {
 		f.handleUnhealthyProvider(provider, issue)
