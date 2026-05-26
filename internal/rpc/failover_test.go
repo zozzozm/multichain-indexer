@@ -24,18 +24,54 @@ func (m *mockNetworkClient) GetClientType() string  { return "rpc" }
 func (m *mockNetworkClient) GetURL() string         { return "http://mock" }
 func (m *mockNetworkClient) Close() error           { return nil }
 
-func newTestFailover() (*Failover[NetworkClient], *Provider) {
-	f := NewFailover[NetworkClient](nil)
-	p := &Provider{
-		Name:       "test-provider",
-		URL:        "http://mock",
+func newTestProvider(name string) *Provider {
+	return &Provider{
+		Name:       name,
+		URL:        "http://mock/" + name,
 		Network:    "test",
 		ClientType: "rpc",
 		Client:     &mockNetworkClient{},
 		State:      StateHealthy,
 	}
+}
+
+func newTestFailover() (*Failover[NetworkClient], *Provider) {
+	f := NewFailover[NetworkClient](nil)
+	p := newTestProvider("test-provider")
 	f.AddProvider(p)
 	return f, p
+}
+
+func TestDefaultFailoverConfig_ForceRotateThreshold(t *testing.T) {
+	cfg := DefaultFailoverConfig()
+
+	assert.Equal(t, 3, cfg.ForceRotateThreshold)
+}
+
+func TestGetBestProvider_ForceRotateSkipsCurrentProvider(t *testing.T) {
+	for _, state := range []string{StateHealthy, StateDegraded, StateUnhealthy} {
+		t.Run(state, func(t *testing.T) {
+			cfg := DefaultFailoverConfig()
+			cfg.ForceRotateThreshold = 3
+			f := NewFailover[NetworkClient](&cfg)
+
+			current := newTestProvider("current")
+			current.State = state
+			current.ConsecutiveErrors = cfg.ForceRotateThreshold
+			next := newTestProvider("next")
+
+			require.NoError(t, f.AddProvider(current))
+			require.NoError(t, f.AddProvider(next))
+
+			got, err := f.GetBestProvider()
+
+			require.NoError(t, err)
+			assert.Equal(t, next.Name, got.Name)
+
+			metrics := f.GetMetrics()
+			assert.Equal(t, int64(1), metrics["provider_switches"])
+		})
+	}
 }
 
 func TestAnalyzeAndHandleError_Timeout(t *testing.T) {
@@ -143,4 +179,74 @@ func TestHandleCapabilityError(t *testing.T) {
 	assert.Equal(t, int64(1), metrics["blacklist_events"])
 	errorsByType := metrics["errors_by_type"].(map[string]int64)
 	assert.Equal(t, int64(1), errorsByType["capability_error"])
+}
+
+func TestExecuteCore_GenericErrorsForceRotateToHealthySibling(t *testing.T) {
+	cfg := DefaultFailoverConfig()
+	cfg.ForceRotateThreshold = 3
+	f := NewFailover[NetworkClient](&cfg)
+
+	first := newTestProvider("first")
+	second := newTestProvider("second")
+	require.NoError(t, f.AddProvider(first))
+	require.NoError(t, f.AddProvider(second))
+
+	for i := 0; i < cfg.ForceRotateThreshold; i++ {
+		provider, err := f.GetBestProvider()
+		require.NoError(t, err)
+		require.Equal(t, first.Name, provider.Name)
+
+		err = f.executeCore(context.Background(), provider, func(NetworkClient) error {
+			return fmt.Errorf("unclassified backend failure")
+		})
+		require.Error(t, err)
+	}
+
+	got, err := f.GetBestProvider()
+	require.NoError(t, err)
+	assert.Equal(t, second.Name, got.Name)
+
+	metrics := f.GetMetrics()
+	errorsByType := metrics["errors_by_type"].(map[string]int64)
+	assert.Equal(t, int64(cfg.ForceRotateThreshold), errorsByType["generic_error"])
+	assert.Equal(t, int64(1), metrics["provider_switches"])
+}
+
+func TestExecuteCore_TransientGenericErrorsDoNotForceRotate(t *testing.T) {
+	cfg := DefaultFailoverConfig()
+	cfg.ForceRotateThreshold = 3
+	f := NewFailover[NetworkClient](&cfg)
+
+	first := newTestProvider("first")
+	second := newTestProvider("second")
+	require.NoError(t, f.AddProvider(first))
+	require.NoError(t, f.AddProvider(second))
+
+	for i := 0; i < cfg.ForceRotateThreshold-1; i++ {
+		provider, err := f.GetBestProvider()
+		require.NoError(t, err)
+		require.Equal(t, first.Name, provider.Name)
+
+		err = f.executeCore(context.Background(), provider, func(NetworkClient) error {
+			return fmt.Errorf("transient unclassified backend failure")
+		})
+		require.Error(t, err)
+	}
+
+	provider, err := f.GetBestProvider()
+	require.NoError(t, err)
+	require.Equal(t, first.Name, provider.Name)
+
+	err = f.executeCore(context.Background(), provider, func(NetworkClient) error {
+		return nil
+	})
+	require.NoError(t, err)
+
+	got, err := f.GetBestProvider()
+	require.NoError(t, err)
+	assert.Equal(t, first.Name, got.Name)
+	assert.Equal(t, 0, first.ConsecutiveErrors)
+
+	metrics := f.GetMetrics()
+	assert.Equal(t, int64(0), metrics["provider_switches"])
 }
