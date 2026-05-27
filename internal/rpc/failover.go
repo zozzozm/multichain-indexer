@@ -15,20 +15,22 @@ import (
 
 // FailoverConfig defines runtime behavior of the failover system.
 type FailoverConfig struct {
-	HealthCheckInterval time.Duration
-	EnableBlacklisting  bool
-	MinActiveProviders  int
-	ErrorThreshold      int
-	DefaultTimeout      time.Duration
+	HealthCheckInterval  time.Duration
+	EnableBlacklisting   bool
+	MinActiveProviders   int
+	ErrorThreshold       int
+	ForceRotateThreshold int
+	DefaultTimeout       time.Duration
 }
 
 func DefaultFailoverConfig() FailoverConfig {
 	return FailoverConfig{
-		HealthCheckInterval: 30 * time.Second,
-		EnableBlacklisting:  true,
-		MinActiveProviders:  2,
-		ErrorThreshold:      5,
-		DefaultTimeout:      10 * time.Second,
+		HealthCheckInterval:  30 * time.Second,
+		EnableBlacklisting:   true,
+		MinActiveProviders:   2,
+		ErrorThreshold:       5,
+		ForceRotateThreshold: 3,
+		DefaultTimeout:       10 * time.Second,
 	}
 }
 
@@ -193,6 +195,12 @@ func NewFailover[T NetworkClient](config *FailoverConfig) *Failover[T] {
 	if config == nil {
 		c := DefaultFailoverConfig()
 		config = &c
+	} else {
+		c := *config
+		config = &c
+	}
+	if config.ForceRotateThreshold <= 0 {
+		config.ForceRotateThreshold = DefaultFailoverConfig().ForceRotateThreshold
 	}
 	return &Failover[T]{
 		providers:    make([]*Provider, 0),
@@ -241,21 +249,29 @@ func (f *Failover[T]) GetBestProvider() (*Provider, error) {
 	if curIdx >= 0 && curIdx < len(providers) {
 		cur := providers[curIdx]
 		if cur.IsAvailable() {
-			return cur, nil
+			cur.mu.RLock()
+			consecutiveErrors := cur.ConsecutiveErrors
+			cur.mu.RUnlock()
+			if consecutiveErrors < f.config.ForceRotateThreshold {
+				return cur, nil
+			}
 		}
 
 		if f.logThrottler.ShouldLog(fmt.Sprintf("unavailable_%s", cur.Name)) {
 			cur.mu.RLock()
 			curURL := cur.URL
+			state := cur.State
 			blacklistedUntil := cur.BlacklistedUntil
+			consecutiveErrors := cur.ConsecutiveErrors
 			cur.mu.RUnlock()
 
 			logger.Warn("Current provider not available, finding alternative",
 				"provider", cur.Name,
 				"url", curURL,
-				"state", cur.State,
+				"state", state,
 				"blacklisted_until", blacklistedUntil.Format(time.RFC3339),
-				"consecutive_errors", cur.ConsecutiveErrors)
+				"consecutive_errors", consecutiveErrors,
+				"force_rotate_threshold", f.config.ForceRotateThreshold)
 		}
 	}
 
@@ -383,6 +399,10 @@ func (f *Failover[T]) executeCore(ctx context.Context, provider *Provider, fn fu
 		f.metrics.IncrementFailure()
 		issue := f.analyzeError(err, elapsed)
 		f.metrics.IncrementErrorType(issue.Reason)
+		if issue.Reason == "generic_error" {
+			logger.Warn("Unknown provider error type", "provider", provider.Name, "error", issue.Detail)
+			f.metrics.IncrementErrorType("unknown_error_type")
+		}
 
 		if issue.MarkUnhealthy {
 			f.handleUnhealthyProvider(provider, issue)
@@ -621,6 +641,20 @@ func (f *Failover[T]) analyzeError(err error, elapsed time.Duration) ProviderIss
 			markUnhealthy: true,
 		},
 		{
+			patterns: []string{
+				"-32701",
+				"-32603",
+				"-32612",
+				"-32613",
+				"please specify an address",
+				"remove restrictions",
+				"order a dedicated full node",
+			},
+			reason:        "restricted_query",
+			cooldown:      5 * time.Minute,
+			markUnhealthy: true,
+		},
+		{
 			patterns:      []string{"timeout", "deadline"},
 			reason:        "timeout",
 			cooldown:      3 * time.Minute,
@@ -673,6 +707,10 @@ func (f *Failover[T]) AnalyzeAndHandleError(provider *Provider, err error, elaps
 
 	issue := f.analyzeError(err, elapsed)
 	f.metrics.IncrementErrorType(issue.Reason)
+	if issue.Reason == "generic_error" {
+		logger.Warn("Unknown provider error type", "provider", provider.Name, "error", issue.Detail)
+		f.metrics.IncrementErrorType("unknown_error_type")
+	}
 
 	if issue.MarkUnhealthy {
 		f.handleUnhealthyProvider(provider, issue)
