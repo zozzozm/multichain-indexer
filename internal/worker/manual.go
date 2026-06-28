@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/fystack/multichain-indexer/internal/indexer"
+	"github.com/fystack/multichain-indexer/internal/status"
 	"github.com/fystack/multichain-indexer/pkg/common/config"
 	"github.com/fystack/multichain-indexer/pkg/events"
 	"github.com/fystack/multichain-indexer/pkg/infra"
@@ -41,6 +42,7 @@ func NewManualWorker(
 	emitter events.Emitter,
 	pubkeyStore pubkeystore.Store,
 	failedChan chan FailedBlockEvent,
+	statusRegistry status.StatusRegistry,
 ) *ManualWorker {
 	return &ManualWorker{
 		BaseWorker: newWorkerWithMode(
@@ -53,6 +55,7 @@ func NewManualWorker(
 			pubkeyStore,
 			ModeManual,
 			failedChan,
+			statusRegistry,
 		),
 		mbs:    missingblockstore.NewMissingBlocksStore(redisClient),
 		config: DefaultManualConfig,
@@ -63,7 +66,7 @@ func (mw *ManualWorker) Start() {
 	mw.logger.Info("Starting manual worker", "chain", mw.chain.GetName())
 
 	// Periodic metrics
-	go func() {
+	mw.executeWithRecovery("manual metrics", func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -74,9 +77,9 @@ func (mw *ManualWorker) Start() {
 				mw.logMissingRangesMetric()
 			}
 		}
-	}()
+	})
 
-	go mw.loop()
+	mw.executeWithRecovery("manual loop", mw.loop)
 }
 
 func (mw *ManualWorker) loop() {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -12,6 +13,10 @@ import (
 var validate = validator.New()
 
 func Load(path string) (*Config, error) {
+	// Unset CHAINS env var to prevent Viper from overriding the
+	// "chains" map in the YAML config with a plain string value.
+	os.Unsetenv("CHAINS")
+
 	v := viper.New()
 	v.SetConfigFile(path)
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -40,7 +45,7 @@ func Load(path string) (*Config, error) {
 
 	for name, chain := range cfg.Chains {
 		// apply name to struct name
-		chain.Name = strings.ToUpper(name)
+		chain.Name = CanonicalChainKey(name)
 		chain.NativeDenom = strings.TrimSpace(chain.NativeDenom)
 		if err := validate.Struct(chain); err != nil {
 			return nil, fmt.Errorf("chain %s validation failed: %w", name, err)

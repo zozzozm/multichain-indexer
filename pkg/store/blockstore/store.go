@@ -1,6 +1,7 @@
 package blockstore
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -12,6 +13,12 @@ import (
 	"github.com/fystack/multichain-indexer/pkg/infra"
 )
 
+// BlockHashEntry represents a block number and its hash for reorg detection.
+type BlockHashEntry struct {
+	BlockNumber uint64 `json:"block_number"`
+	Hash        string `json:"hash"`
+}
+
 const (
 	BlockStates = "block_states"
 )
@@ -20,6 +27,24 @@ type CatchupRange struct {
 	Start   uint64 `json:"start"`
 	End     uint64 `json:"end"`
 	Current uint64 `json:"current"`
+}
+
+// CatchupPendingBlocks returns how many blocks remain across all active catchup ranges.
+func CatchupPendingBlocks(ranges []CatchupRange) uint64 {
+	var pending uint64
+	for _, r := range ranges {
+		if r.End < r.Start {
+			continue
+		}
+		if r.Current < r.Start {
+			pending += r.End - r.Start + 1
+			continue
+		}
+		if r.Current < r.End {
+			pending += r.End - r.Current
+		}
+	}
+	return pending
 }
 
 func latestBlockKey(chainName string) string {
@@ -33,6 +58,10 @@ func failedBlocksKey(chainName string) string {
 // Catchup progress keys
 func composeCatchupKey(chain string) string {
 	return fmt.Sprintf("%s/%s/%s/", BlockStates, chain, constant.KVPrefixProgressCatchup)
+}
+
+func blockHashesKey(chainName string) string {
+	return fmt.Sprintf("%s/%s/%s", BlockStates, chainName, constant.KVPrefixBlockHash)
 }
 
 func catchupKey(chain string, start, end uint64) string {
@@ -53,8 +82,13 @@ type Store interface {
 	RemoveFailedBlocks(chainName string, blockNumbers []uint64) error
 
 	SaveCatchupProgress(chain string, start, end, current uint64) error
+	SaveCatchupRanges(chain string, ranges []CatchupRange) error
 	GetCatchupProgress(chain string) ([]CatchupRange, error)
 	DeleteCatchupRange(chain string, start, end uint64) error
+
+	// Block hash persistence for reorg detection across restarts
+	SaveBlockHashes(chainName string, hashes []BlockHashEntry) error
+	GetBlockHashes(chainName string) ([]BlockHashEntry, error)
 
 	Close() error
 }
@@ -193,6 +227,37 @@ func (bs *blockStore) SaveCatchupProgress(chain string, start, end, current uint
 	return bs.store.Set(key, fmt.Sprintf("%d", current))
 }
 
+// SaveCatchupRanges batch-writes multiple catchup ranges atomically.
+func (bs *blockStore) SaveCatchupRanges(chain string, ranges []CatchupRange) error {
+	if chain == "" {
+		return errors.New("chain name is required")
+	}
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	pairs := make([]infra.KVPair, 0, len(ranges))
+	for _, r := range ranges {
+		if r.Start == 0 || r.End < r.Start {
+			continue
+		}
+		pairs = append(pairs, infra.KVPair{
+			Key:   catchupKey(chain, r.Start, r.End),
+			Value: []byte(fmt.Sprintf("%d", r.Current)),
+		})
+	}
+
+	if len(pairs) == 0 {
+		return nil
+	}
+
+	logger.Debug("Batch saving catchup ranges",
+		"chain", chain,
+		"count", len(pairs),
+	)
+	return bs.store.BatchSet(pairs)
+}
+
 // GetCatchupProgress returns all catchup ranges (struct-based).
 func (bs *blockStore) GetCatchupProgress(chain string) ([]CatchupRange, error) {
 	if chain == "" {
@@ -241,6 +306,34 @@ func (bs *blockStore) DeleteCatchupRange(chain string, start, end uint64) error 
 		)
 	}
 	return err
+}
+
+// SaveBlockHashes persists block hashes for reorg detection across restarts.
+func (bs *blockStore) SaveBlockHashes(chainName string, hashes []BlockHashEntry) error {
+	if chainName == "" {
+		return errors.New("chain name is required")
+	}
+	data, err := json.Marshal(hashes)
+	if err != nil {
+		return fmt.Errorf("marshal block hashes: %w", err)
+	}
+	return bs.store.Set(blockHashesKey(chainName), string(data))
+}
+
+// GetBlockHashes loads persisted block hashes for reorg detection.
+func (bs *blockStore) GetBlockHashes(chainName string) ([]BlockHashEntry, error) {
+	if chainName == "" {
+		return nil, errors.New("chain name is required")
+	}
+	raw, err := bs.store.Get(blockHashesKey(chainName))
+	if err != nil {
+		return nil, nil // Key not found is not an error
+	}
+	var hashes []BlockHashEntry
+	if err := json.Unmarshal([]byte(raw), &hashes); err != nil {
+		return nil, fmt.Errorf("unmarshal block hashes: %w", err)
+	}
+	return hashes, nil
 }
 
 func (bs *blockStore) Close() error {

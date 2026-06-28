@@ -19,14 +19,30 @@ const (
 )
 
 const (
-	NetworkTypeEVM    NetworkType = "evm"
-	NetworkTypeTron   NetworkType = "tron"
-	NetworkTypeBtc    NetworkType = "btc"
-	NetworkTypeSol    NetworkType = "sol"
-	NetworkTypeApt    NetworkType = "apt"
-	NetworkTypeSui    NetworkType = "sui"
-	NetworkTypeCosmos NetworkType = "cosmos"
+	NetworkTypeEVM     NetworkType = "evm"
+	NetworkTypeTron    NetworkType = "tron"
+	NetworkTypeBtc     NetworkType = "btc"
+	NetworkTypeSol     NetworkType = "sol"
+	NetworkTypeApt     NetworkType = "apt"
+	NetworkTypeSui     NetworkType = "sui"
+	NetworkTypeCosmos  NetworkType = "cosmos"
+	NetworkTypeTon     NetworkType = "ton"
+	NetworkTypeXRP     NetworkType = "xrp"
+	NetworkTypeStellar NetworkType = "stellar"
 )
+
+var AllNetworkTypes = []NetworkType{
+	NetworkTypeEVM,
+	NetworkTypeTron,
+	NetworkTypeBtc,
+	NetworkTypeSol,
+	NetworkTypeApt,
+	NetworkTypeSui,
+	NetworkTypeCosmos,
+	NetworkTypeTon,
+	NetworkTypeXRP,
+	NetworkTypeStellar,
+}
 
 const (
 	BFBackendRedis    BFType = "redis"

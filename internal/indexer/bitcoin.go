@@ -14,16 +14,14 @@ import (
 	"github.com/fystack/multichain-indexer/pkg/common/constant"
 	"github.com/fystack/multichain-indexer/pkg/common/enum"
 	"github.com/fystack/multichain-indexer/pkg/common/types"
-	"github.com/fystack/multichain-indexer/pkg/common/utils"
 	"github.com/shopspring/decimal"
 )
 
 type BitcoinIndexer struct {
-	chainName     string
-	config        config.ChainConfig
-	failover      *rpc.Failover[bitcoin.BitcoinAPI]
-	pubkeyStore   PubkeyStore
-	confirmations uint64
+	chainName   string
+	config      config.ChainConfig
+	failover    *rpc.Failover[bitcoin.BitcoinAPI]
+	pubkeyStore PubkeyStore
 }
 
 func NewBitcoinIndexer(
@@ -32,15 +30,20 @@ func NewBitcoinIndexer(
 	failover *rpc.Failover[bitcoin.BitcoinAPI],
 	pubkeyStore PubkeyStore,
 ) *BitcoinIndexer {
-	confirmations := cfg.Confirmations
-
 	return &BitcoinIndexer{
-		chainName:     chainName,
-		config:        cfg,
-		failover:      failover,
-		pubkeyStore:   pubkeyStore,
-		confirmations: confirmations,
+		chainName:   chainName,
+		config:      cfg,
+		failover:    failover,
+		pubkeyStore: pubkeyStore,
 	}
+}
+
+// satoshisFromFloat converts a BTC float64 value to satoshis using string-based decimal
+// arithmetic to avoid float64 truncation errors (e.g. 0.1 * 1e8 = 9999999.999...).
+func satoshisFromFloat(value float64) int64 {
+	return decimal.RequireFromString(fmt.Sprintf("%.8f", value)).
+		Mul(decimal.NewFromInt(1e8)).
+		IntPart()
 }
 
 func (b *BitcoinIndexer) GetName() string {
@@ -73,7 +76,7 @@ func (b *BitcoinIndexer) GetBlock(ctx context.Context, number uint64) (*types.Bl
 	var btcBlock *bitcoin.Block
 
 	err := b.failover.ExecuteWithRetry(ctx, func(c bitcoin.BitcoinAPI) error {
-		// Verbosity 3 = full transaction details with prevout data included (Bitcoin Core 25+)
+		// Verbosity 3 = full transaction details with prevout data included
 		block, err := c.GetBlockByHeight(ctx, number, 3)
 		if err != nil {
 			return err
@@ -89,42 +92,93 @@ func (b *BitcoinIndexer) GetBlock(ctx context.Context, number uint64) (*types.Bl
 	return b.convertBlockWithPrevoutResolution(ctx, btcBlock)
 }
 
-// convertBlockWithPrevoutResolution converts a block and resolves prevout data for transactions
+// convertBlockWithPrevoutResolution converts a block and resolves prevout data
+// for transactions that lack it. Prevout resolution runs in parallel using a
+// pool sized to config.Throttle.Concurrency.
 func (b *BitcoinIndexer) convertBlockWithPrevoutResolution(ctx context.Context, btcBlock *bitcoin.Block) (*types.Block, error) {
-	var allTransfers []types.Transaction
-	var allUTXOEvents []types.UTXOEvent
-
 	latestBlock := btcBlock.Height
 	if btcBlock.Confirmations > 0 {
 		latestBlock = btcBlock.Height + btcBlock.Confirmations - 1
 	}
 
-	provider, _ := b.failover.GetBestProvider()
-	var btcClient *bitcoin.BitcoinClient
-	if provider != nil {
-		btcClient, _ = provider.Client.(*bitcoin.BitcoinClient)
+	// Stage 1: Collect indices of transactions missing prevout data.
+	var needsResolution []int
+	for i := range btcBlock.Tx {
+		tx := &btcBlock.Tx[i]
+		if tx.IsCoinbase() {
+			continue
+		}
+		needsAny := false
+		for _, vin := range tx.Vin {
+			if vin.TxID != "" && vin.PrevOut == nil {
+				needsAny = true
+				break
+			}
+		}
+		if needsAny {
+			needsResolution = append(needsResolution, i)
+		}
 	}
+
+	// Stage 2: Resolve prevout data in parallel.
+	if len(needsResolution) > 0 {
+		concurrency := b.config.Throttle.Concurrency
+		if concurrency < 1 {
+			concurrency = 1
+		}
+
+		type job struct{ txIdx int }
+		jobs := make(chan job, len(needsResolution))
+		for _, idx := range needsResolution {
+			jobs <- job{txIdx: idx}
+		}
+		close(jobs)
+
+		var wg sync.WaitGroup
+		for i := 0; i < concurrency; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				provider, err := b.failover.GetBestProvider()
+				if err != nil || provider == nil {
+					for range jobs {
+					}
+					return
+				}
+				client, ok := provider.Client.(bitcoin.BitcoinAPI)
+				if !ok {
+					for range jobs {
+					}
+					return
+				}
+				for j := range jobs {
+					tx := &btcBlock.Tx[j.txIdx]
+					resolved, err := client.GetTransactionWithPrevouts(ctx, tx.TxID)
+					if err != nil {
+						continue // silently skip — same behaviour as the previous sequential code
+					}
+					for k := range tx.Vin {
+						if k < len(resolved.Vin) && resolved.Vin[k].PrevOut != nil {
+							tx.Vin[k].PrevOut = resolved.Vin[k].PrevOut
+						}
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	// Stage 3: Extract transfers and UTXO events.
+	var allTransfers []types.Transaction
+	var allUTXOEvents []types.UTXOEvent
 
 	for i := range btcBlock.Tx {
 		tx := &btcBlock.Tx[i]
-
 		if tx.IsCoinbase() {
 			continue
 		}
 
-		if btcClient != nil && len(tx.Vin) > 0 && tx.Vin[0].PrevOut == nil {
-			if tx.Vin[0].TxID != "" {
-				if resolved, err := btcClient.GetTransactionWithPrevouts(ctx, tx.TxID); err == nil {
-					for j := range tx.Vin {
-						if j < len(resolved.Vin) && resolved.Vin[j].PrevOut != nil {
-							tx.Vin[j].PrevOut = resolved.Vin[j].PrevOut
-						}
-					}
-				}
-			}
-		}
-
-		transfers := b.extractTransfersFromTx(tx, btcBlock.Height, btcBlock.Time, latestBlock)
+		transfers := b.extractTransfersFromTx(tx, btcBlock.Hash, btcBlock.Height, btcBlock.Time, latestBlock)
 		allTransfers = append(allTransfers, transfers...)
 
 		if b.config.IndexUTXO {
@@ -142,7 +196,6 @@ func (b *BitcoinIndexer) convertBlockWithPrevoutResolution(ctx context.Context, 
 		Timestamp:    btcBlock.Time,
 		Transactions: allTransfers,
 	}
-
 	block.SetMetadata("utxo_events", allUTXOEvents)
 
 	return block, nil
@@ -230,6 +283,7 @@ func (b *BitcoinIndexer) GetBlocksByNumbers(
 // extractTransfersFromTx extracts all transfers from a transaction.
 func (b *BitcoinIndexer) extractTransfersFromTx(
 	tx *bitcoin.Transaction,
+	blockHash string,
 	blockNumber, ts, latestBlock uint64,
 ) []types.Transaction {
 	var transfers []types.Transaction
@@ -242,29 +296,25 @@ func (b *BitcoinIndexer) extractTransfersFromTx(
 	fee := tx.CalculateFee()
 
 	confirmations := b.calculateConfirmations(blockNumber, latestBlock)
-	status := utils.CalculateTransactionStatus(confirmations, b.confirmations)
+	status := types.StatusPending
+	if confirmations > 0 {
+		status = types.StatusConfirmed
+	}
 
-	fromAddr := b.getFirstInputAddress(tx)
+	allInputAddrs := b.getAllInputAddresses(tx)
+	fromAddr := ""
+	if len(allInputAddrs) > 0 {
+		fromAddr = allInputAddrs[0]
+	}
 
 	feeAssigned := false
-	for _, vout := range tx.Vout {
-		toAddr := bitcoin.GetOutputAddress(&vout)
-		if toAddr == "" {
+	for voutIdx, vout := range tx.Vout {
+		toAddrs := bitcoin.GetOutputAddresses(&vout)
+		if len(toAddrs) == 0 {
 			continue // Skip unspendable outputs (OP_RETURN, etc.)
 		}
 
-		if normalized, err := bitcoin.NormalizeBTCAddress(toAddr); err == nil {
-			toAddr = normalized
-		}
-
-		// For Transfer events, respect index_change_output config
-		// (This filters what goes to transfer.event.dispatch)
-		if !b.config.IndexChangeOutput && fromAddr != "" && fromAddr == toAddr {
-			continue
-		}
-
-		// Convert BTC to satoshis (multiply by 1e8)
-		amountSat := int64(vout.Value * 1e8)
+		amountSat := satoshisFromFloat(vout.Value)
 
 		txFee := decimal.Zero
 		if !feeAssigned {
@@ -272,22 +322,30 @@ func (b *BitcoinIndexer) extractTransfersFromTx(
 			feeAssigned = true
 		}
 
-		transfer := types.Transaction{
-			TxHash:        tx.TxID,
-			NetworkId:     b.config.NetworkId,
-			BlockNumber:   blockNumber,
-			FromAddress:   fromAddr,
-			ToAddress:     toAddr,
-			AssetAddress:  "", // Empty for native BTC
-			Amount:        strconv.FormatInt(amountSat, 10),
-			Type:          constant.TxTypeNativeTransfer,
-			TxFee:         txFee,
-			Timestamp:     ts,
-			Confirmations: confirmations,
-			Status:        status,
-		}
+		for addrIdx, toAddr := range toAddrs {
+			if normalized, err := bitcoin.NormalizeBTCAddress(toAddr); err == nil {
+				toAddr = normalized
+			}
 
-		transfers = append(transfers, transfer)
+			transfer := types.Transaction{
+				TxHash:        tx.TxID,
+				NetworkId:     b.config.NetworkId,
+				BlockHash:     blockHash,
+				BlockNumber:   blockNumber,
+				TransferIndex: fmt.Sprintf("%d:%d", voutIdx, addrIdx),
+				FromAddress:   fromAddr,
+				FromAddresses: allInputAddrs,
+				ToAddress:     toAddr,
+				AssetAddress:  "",
+				Amount:        strconv.FormatInt(amountSat, 10),
+				Type:          constant.TxTypeNativeTransfer,
+				TxFee:         txFee,
+				Timestamp:     ts,
+				Confirmations: confirmations,
+				Status:        status,
+			}
+			transfers = append(transfers, transfer)
+		}
 	}
 
 	return transfers
@@ -309,24 +367,26 @@ func (b *BitcoinIndexer) extractUTXOEvent(
 	// Extract ALL created UTXOs (vouts) without filtering
 	// Filtering happens at emission level based on monitored addresses
 	for i, vout := range tx.Vout {
-		addr := bitcoin.GetOutputAddress(&vout)
-		if addr == "" {
+		addrs := bitcoin.GetOutputAddresses(&vout)
+		if len(addrs) == 0 {
 			continue
 		}
 
-		if normalized, err := bitcoin.NormalizeBTCAddress(addr); err == nil {
-			addr = normalized
+		amountSat := satoshisFromFloat(vout.Value)
+
+		for _, addr := range addrs {
+			if normalized, err := bitcoin.NormalizeBTCAddress(addr); err == nil {
+				addr = normalized
+			}
+
+			created = append(created, types.UTXO{
+				TxHash:       tx.TxID,
+				Vout:         uint32(i),
+				Address:      addr,
+				Amount:       strconv.FormatInt(amountSat, 10),
+				ScriptPubKey: vout.ScriptPubKey.Hex,
+			})
 		}
-
-		amountSat := int64(vout.Value * 1e8)
-
-		created = append(created, types.UTXO{
-			TxHash:       tx.TxID,
-			Vout:         uint32(i),
-			Address:      addr,
-			Amount:       strconv.FormatInt(amountSat, 10),
-			ScriptPubKey: vout.ScriptPubKey.Hex,
-		})
 	}
 
 	// Extract ALL spent UTXOs (vins) without filtering
@@ -345,7 +405,7 @@ func (b *BitcoinIndexer) extractUTXOEvent(
 			addr = normalized
 		}
 
-		amountSat := int64(vin.PrevOut.Value * 1e8)
+		amountSat := satoshisFromFloat(vin.PrevOut.Value)
 
 		spent = append(spent, types.SpentUTXO{
 			TxHash:  vin.TxID,
@@ -363,7 +423,10 @@ func (b *BitcoinIndexer) extractUTXOEvent(
 	}
 
 	confirmations := b.calculateConfirmations(blockNumber, latestBlock)
-	status := utils.CalculateTransactionStatus(confirmations, b.confirmations)
+	status := types.StatusPending
+	if confirmations > 0 {
+		status = types.StatusConfirmed
+	}
 	fee := tx.CalculateFee()
 
 	return &types.UTXOEvent{
@@ -380,16 +443,25 @@ func (b *BitcoinIndexer) extractUTXOEvent(
 	}
 }
 
-func (b *BitcoinIndexer) getFirstInputAddress(tx *bitcoin.Transaction) string {
+// getAllInputAddresses returns deduplicated, normalized input addresses for a transaction,
+// preserving the order of first appearance. Returns an empty slice if no inputs have prevout data.
+func (b *BitcoinIndexer) getAllInputAddresses(tx *bitcoin.Transaction) []string {
+	seen := make(map[string]bool)
+	var addrs []string
 	for _, vin := range tx.Vin {
-		if addr := bitcoin.GetInputAddress(&vin); addr != "" {
-			if normalized, err := bitcoin.NormalizeBTCAddress(addr); err == nil {
-				return normalized
-			}
-			return addr
+		addr := bitcoin.GetInputAddress(&vin)
+		if addr == "" {
+			continue
+		}
+		if normalized, err := bitcoin.NormalizeBTCAddress(addr); err == nil {
+			addr = normalized
+		}
+		if !seen[addr] {
+			seen[addr] = true
+			addrs = append(addrs, addr)
 		}
 	}
-	return ""
+	return addrs
 }
 
 // calculateConfirmations calculates the number of confirmations for a transaction
@@ -410,50 +482,36 @@ func (b *BitcoinIndexer) IsHealthy() bool {
 	return err == nil
 }
 
-// GetConfirmedHeight returns the latest block height minus confirmations
-// This ensures we only index blocks with sufficient confirmations to avoid reorgs
-func (b *BitcoinIndexer) GetConfirmedHeight(ctx context.Context) (uint64, error) {
-	latest, err := b.GetLatestBlockNumber(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get latest block: %w", err)
-	}
-
-	if latest < b.confirmations {
-		return 0, nil
-	}
-
-	return latest - b.confirmations, nil
-}
-
 // GetMempoolTransactions fetches and processes transactions from the mempool
-// Returns transactions involving monitored addresses with 0 confirmations
-func (b *BitcoinIndexer) GetMempoolTransactions(ctx context.Context) ([]types.Transaction, error) {
+// Returns transactions and UTXO events involving monitored addresses with 0 confirmations
+func (b *BitcoinIndexer) GetMempoolTransactions(ctx context.Context) ([]types.Transaction, []types.UTXOEvent, error) {
 	provider, err := b.failover.GetBestProvider()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get bitcoin provider: %w", err)
+		return nil, nil, fmt.Errorf("failed to get bitcoin provider: %w", err)
 	}
 
 	btcClient, ok := provider.Client.(*bitcoin.BitcoinClient)
 	if !ok {
-		return nil, fmt.Errorf("invalid client type")
+		return nil, nil, fmt.Errorf("invalid client type")
 	}
 
 	latestBlock, err := b.GetLatestBlockNumber(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get latest block: %w", err)
+		return nil, nil, fmt.Errorf("failed to get latest block: %w", err)
 	}
 
 	result, err := btcClient.GetRawMempool(ctx, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get mempool: %w", err)
+		return nil, nil, fmt.Errorf("failed to get mempool: %w", err)
 	}
 
 	txids, ok := result.([]string)
 	if !ok {
-		return nil, fmt.Errorf("unexpected mempool format")
+		return nil, nil, fmt.Errorf("unexpected mempool format")
 	}
 
 	var allTransfers []types.Transaction
+	var allUTXOEvents []types.UTXOEvent
 	currentTime := uint64(time.Now().Unix())
 
 	for _, txid := range txids {
@@ -462,9 +520,16 @@ func (b *BitcoinIndexer) GetMempoolTransactions(ctx context.Context) ([]types.Tr
 			continue
 		}
 
-		transfers := b.extractTransfersFromTx(tx, 0, currentTime, latestBlock)
+		transfers := b.extractTransfersFromTx(tx, "", 0, currentTime, latestBlock)
 		allTransfers = append(allTransfers, transfers...)
+
+		if b.config.IndexUTXO {
+			utxoEvent := b.extractUTXOEvent(tx, 0, "", currentTime, latestBlock)
+			if utxoEvent != nil {
+				allUTXOEvents = append(allUTXOEvents, *utxoEvent)
+			}
+		}
 	}
 
-	return allTransfers, nil
+	return allTransfers, allUTXOEvents, nil
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/alecthomas/kong"
 	"gorm.io/gorm"
 
+	"github.com/fystack/multichain-indexer/internal/status"
 	"github.com/fystack/multichain-indexer/internal/worker"
 	"github.com/fystack/multichain-indexer/pkg/addressbloomfilter"
 	"github.com/fystack/multichain-indexer/pkg/common/config"
@@ -169,8 +170,8 @@ func runIndexer(chains []string, configPath string, debug, manual, catchup, from
 
 	// If no chains specified, use all configured chains
 	if len(chains) == 0 {
-		chains = cfg.Chains.Names()
-		logger.Info("No chains specified, using all configured chains", "chains", chains)
+		chains = cfg.Chains.EnabledNames()
+		logger.Info("No chains specified, using enabled configured chains", "chains", chains)
 	} else {
 		logger.Info("Indexing specified chains", "chains", chains)
 	}
@@ -186,11 +187,19 @@ func runIndexer(chains []string, configPath string, debug, manual, catchup, from
 		logger.Info("Starting from latest block for all specified chains", "chains", chains)
 	}
 
+	// Build bloom sync config if enabled
+	var bloomSyncCfg *worker.BloomSyncConfig
+	if services.Bloomfilter != nil && services.Bloomfilter.Sync.Enabled && db != nil {
+		c := worker.NewBloomSyncConfig(services.Bloomfilter.Sync)
+		bloomSyncCfg = &c
+	}
+
 	// Create manager with all workers using factory
 	managerCfg := worker.ManagerConfig{
 		Chains:        chains,
 		EnableCatchup: catchup,
 		EnableManual:  manual,
+		BloomSync:     bloomSyncCfg,
 	}
 
 	manager := worker.CreateManagerWithWorkers(
@@ -204,7 +213,7 @@ func runIndexer(chains []string, configPath string, debug, manual, catchup, from
 		managerCfg,
 	)
 
-	healthServer := startHealthServer(cfg.Services.Port, cfg)
+	healthServer := startHealthServer(cfg.Services.Port, cfg, manager)
 
 	// Start all workers
 	logger.Info("Starting all workers")
@@ -215,19 +224,21 @@ func runIndexer(chains []string, configPath string, debug, manual, catchup, from
 
 	logger.Info("Shutting down indexer...")
 
-	// Shutdown health server
+	// Stop workers first so health endpoint can report during drain
+	manager.Stop()
+
+	// Then shutdown health server
 	if healthServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := healthServer.Shutdown(ctx); err != nil {
+		if err := healthServer.Shutdown(shutdownCtx); err != nil {
 			logger.Error("Health server shutdown failed", "error", err)
 		} else {
 			logger.Info("Health server stopped gracefully")
 		}
 	}
 
-	manager.Stop()
-	logger.Info("✅ Indexer stopped gracefully")
+	logger.Info("Indexer stopped gracefully")
 }
 
 type HealthResponse struct {
@@ -236,7 +247,7 @@ type HealthResponse struct {
 	Version   string    `json:"version"`
 }
 
-func startHealthServer(port int, cfg *config.Config) *http.Server {
+func startHealthServer(port int, cfg *config.Config, manager *worker.Manager) *http.Server {
 	mux := http.NewServeMux()
 
 	version := cfg.Version
@@ -256,13 +267,33 @@ func startHealthServer(port int, cfg *config.Config) *http.Server {
 		json.NewEncoder(w).Encode(response)
 	})
 
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		response := status.StatusResponse{
+			Timestamp: time.Now().UTC(),
+			Version:   version,
+			Networks:  []status.NetworkStatus{},
+		}
+		if manager != nil {
+			response = manager.StatusSnapshot(version)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	})
+
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: mux,
 	}
 
 	go func() {
-		logger.Info("Health check server started", "port", port, "endpoint", "/health")
+		logger.Info("Health check server started", "port", port, "endpoints", []string{"/health", "/status"})
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("Health server failed to start", "error", err)
 		}

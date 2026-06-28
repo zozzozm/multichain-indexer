@@ -2,12 +2,14 @@ package worker
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"time"
 
 	"log/slog"
 
 	"github.com/fystack/multichain-indexer/internal/indexer"
+	"github.com/fystack/multichain-indexer/internal/status"
 	"github.com/fystack/multichain-indexer/pkg/common/config"
 	"github.com/fystack/multichain-indexer/pkg/common/logger"
 	"github.com/fystack/multichain-indexer/pkg/common/types"
@@ -18,6 +20,19 @@ import (
 	"github.com/fystack/multichain-indexer/pkg/store/pubkeystore"
 )
 
+// BlockStatus represents the outcome of processing a single block.
+type BlockStatus string
+
+const (
+	BlockStatusProcessed BlockStatus = "processed"
+	BlockStatusNotFound  BlockStatus = "not_found"
+	BlockStatusFailed    BlockStatus = "failed"
+)
+
+// BlockResultObserver is called for every block result when set.
+// It receives the chain name, block number, and the status assigned by the indexer.
+type BlockResultObserver func(chainName string, blockNumber uint64, status BlockStatus)
+
 // BaseWorker holds the common state and logic shared by all worker types.
 type BaseWorker struct {
 	ctx    context.Context
@@ -25,13 +40,15 @@ type BaseWorker struct {
 	mode   WorkerMode
 	logger *slog.Logger
 
-	config      config.ChainConfig
-	chain       indexer.Indexer
-	kvstore     infra.KVStore
-	blockStore  blockstore.Store
-	pubkeyStore pubkeystore.Store
-	emitter     events.Emitter
-	failedChan  chan FailedBlockEvent
+	config         config.ChainConfig
+	chain          indexer.Indexer
+	kvstore        infra.KVStore
+	blockStore     blockstore.Store
+	pubkeyStore    pubkeystore.Store
+	emitter        events.Emitter
+	failedChan     chan FailedBlockEvent
+	observer       BlockResultObserver
+	statusRegistry status.StatusRegistry
 }
 
 // Stop stops the worker and cleans up internal resources
@@ -51,6 +68,7 @@ func newWorkerWithMode(
 	pubkeyStore pubkeystore.Store,
 	mode WorkerMode,
 	failedChan chan FailedBlockEvent,
+	statusRegistry status.StatusRegistry,
 ) *BaseWorker {
 	ctx, cancel := context.WithCancel(ctx)
 	log := logger.With(
@@ -59,17 +77,18 @@ func newWorkerWithMode(
 	)
 
 	return &BaseWorker{
-		ctx:         ctx,
-		cancel:      cancel,
-		mode:        mode,
-		logger:      log,
-		config:      cfg,
-		chain:       chain,
-		kvstore:     kv,
-		blockStore:  blockStore,
-		pubkeyStore: pubkeyStore,
-		emitter:     emitter,
-		failedChan:  failedChan,
+		ctx:            ctx,
+		cancel:         cancel,
+		mode:           mode,
+		logger:         log,
+		config:         cfg,
+		chain:          chain,
+		kvstore:        kv,
+		blockStore:     blockStore,
+		pubkeyStore:    pubkeyStore,
+		emitter:        emitter,
+		failedChan:     failedChan,
+		statusRegistry: status.EnsureStatusRegistry(statusRegistry),
 	}
 }
 
@@ -90,7 +109,9 @@ func (bw *BaseWorker) run(job func() error) {
 			start := time.Now()
 
 			// Use Exponential retry for the job
-			if err := retry.Exponential(job, retry.ExponentialConfig{
+			if err := retry.Exponential(func() error {
+				return bw.executeRecoverable("worker job", job)
+			}, retry.ExponentialConfig{
 				InitialInterval: retryInterval,
 				MaxElapsedTime:  bw.config.PollInterval * 4,
 				OnRetry: func(err error, next time.Duration) {
@@ -113,10 +134,20 @@ func (bw *BaseWorker) run(job func() error) {
 	}
 }
 
+// notifyObserver calls the observer callback if set.
+func (bw *BaseWorker) notifyObserver(blockNumber uint64, status BlockStatus) {
+	if bw.observer != nil {
+		bw.observer(bw.chain.GetName(), blockNumber, status)
+	}
+}
+
 // handleBlockResult processes a block result and persists/forwards errors if needed.
 func (bw *BaseWorker) handleBlockResult(result indexer.BlockResult) bool {
+	registry := status.EnsureStatusRegistry(bw.statusRegistry)
+
 	if result.Error != nil {
 		_ = bw.blockStore.SaveFailedBlock(bw.chain.GetNetworkInternalCode(), result.Number)
+		registry.MarkFailedBlock(bw.chain.GetName(), result.Number)
 
 		// Non-blocking push to failedChan
 		select {
@@ -134,6 +165,12 @@ func (bw *BaseWorker) handleBlockResult(result indexer.BlockResult) bool {
 			"block", result.Number,
 			"err", result.Error.Message,
 		)
+
+		if result.Error.ErrorType == indexer.ErrorTypeBlockNotFound {
+			bw.notifyObserver(result.Number, BlockStatusNotFound)
+		} else {
+			bw.notifyObserver(result.Number, BlockStatusFailed)
+		}
 		return false
 	}
 
@@ -142,6 +179,7 @@ func (bw *BaseWorker) handleBlockResult(result indexer.BlockResult) bool {
 			"chain", bw.chain.GetName(),
 			"block", result.Number,
 		)
+		bw.notifyObserver(result.Number, BlockStatusFailed)
 		return false
 	}
 
@@ -152,12 +190,14 @@ func (bw *BaseWorker) handleBlockResult(result indexer.BlockResult) bool {
 		"chain", bw.chain.GetName(),
 		"block", result.Block.Number,
 	)
+	registry.ClearFailedBlocks(bw.chain.GetName(), []uint64{result.Number})
+	bw.notifyObserver(result.Number, BlockStatusProcessed)
 	return true
 }
 
 // emitBlock emits relevant transactions for subscribed addresses.
-// Only emits transactions where ToAddress is monitored (incoming deposits).
-// Outgoing transactions are handled by the transactor/withdrawal flow.
+// When two_way_indexing is enabled, both incoming (to) and outgoing (from) transfers are emitted.
+// For internal transfers where both addresses are monitored, two events are emitted — one per direction.
 func (bw *BaseWorker) emitBlock(block *types.Block) {
 	if block == nil || bw.pubkeyStore == nil {
 		return
@@ -165,27 +205,76 @@ func (bw *BaseWorker) emitBlock(block *types.Block) {
 
 	addressType := bw.chain.GetNetworkType()
 	for _, tx := range block.Transactions {
-		// Only check if ToAddress is monitored (incoming transfer/deposit)
-		// Outgoing transactions (FROM monitored addresses) are handled by withdrawal flow
 		toMonitored := tx.ToAddress != "" && bw.pubkeyStore.Exist(addressType, tx.ToAddress)
+		fromMonitored := false
+		if bw.config.TwoWayIndexing {
+			for _, addr := range tx.AllSenderAddresses() {
+				if bw.pubkeyStore.Exist(addressType, addr) {
+					fromMonitored = true
+					break
+				}
+			}
+		}
 
 		if toMonitored {
+			inTx := tx
+			inTx.Direction = types.DirectionIn
+			inTx = normalizeTransactionForDirection(bw.chain, inTx, types.DirectionIn)
 			bw.logger.Info("Emitting matched transaction",
-				"direction", "incoming",
-				"from", tx.FromAddress,
-				"to", tx.ToAddress,
+				"direction", types.DirectionIn,
+				"from", inTx.FromAddress,
+				"to", inTx.ToAddress,
 				"chain", bw.chain.GetName(),
-				"type", tx.Type,
-				"addressType", addressType,
-				"txhash", tx.TxHash,
-				"status", tx.Status,
-				"confirmations", tx.Confirmations,
+				"type", inTx.Type,
+				"txhash", inTx.TxHash,
+				"status", inTx.Status,
+				"confirmations", inTx.Confirmations,
 			)
-			_ = bw.emitter.EmitTransaction(bw.chain.GetName(), &tx)
+			_ = bw.emitter.EmitTransaction(bw.chain.GetName(), &inTx)
+		}
+
+		if fromMonitored {
+			outTx := tx
+			outTx.Direction = types.DirectionOut
+			outTx = normalizeTransactionForDirection(bw.chain, outTx, types.DirectionOut)
+			bw.logger.Info("Emitting matched transaction",
+				"direction", types.DirectionOut,
+				"from", outTx.FromAddress,
+				"to", outTx.ToAddress,
+				"chain", bw.chain.GetName(),
+				"type", outTx.Type,
+				"txhash", outTx.TxHash,
+				"status", outTx.Status,
+				"confirmations", outTx.Confirmations,
+			)
+			_ = bw.emitter.EmitTransaction(bw.chain.GetName(), &outTx)
 		}
 	}
 
 	bw.emitUTXOs(block)
+}
+
+func normalizeTransactionForDirection(
+	chain indexer.Indexer,
+	tx types.Transaction,
+	direction string,
+) types.Transaction {
+	tx = cloneTransactionMetadata(tx)
+	if normalizer, ok := chain.(indexer.DirectionalNormalizer); ok {
+		return normalizer.NormalizeForDirection(tx, direction)
+	}
+	return tx
+}
+
+func cloneTransactionMetadata(tx types.Transaction) types.Transaction {
+	if len(tx.Metadata) == 0 {
+		return tx
+	}
+
+	cloned := make(map[string]any, len(tx.Metadata))
+	maps.Copy(cloned, tx.Metadata)
+	tx.Metadata = cloned
+	return tx
 }
 
 // emitUTXOs emits UTXO events for monitored addresses.

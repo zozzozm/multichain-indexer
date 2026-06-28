@@ -4,9 +4,14 @@ version: "1.0.0"
 
 # Global defaults - applies to all chains unless overridden
 defaults:
+  enabled: false # chains inherit this unless they override enabled below
   from_latest: true # start indexing from the latest block
   poll_interval: "5s" # how often to poll for new blocks
   reorg_rollback_window: 20 # number of blocks to roll back on reorg
+  two_way_indexing: false # enable two-way indexing for all chains
+  status:
+    healthy_max_pending_blocks: 50
+    slow_max_pending_blocks: 250
   client:
     timeout: "20s" # RPC timeout per request
     max_retries: 3 # max retries per RPC call
@@ -37,23 +42,43 @@ chains:
     throttle:
       rps: 5
       burst: 8
+    status:
+      # Optional per-chain override for /status health condition.
+      healthy_max_pending_blocks: 80
+      slow_max_pending_blocks: 400
 
   ethereum_mainnet:
+    enabled: true # example override: this chain starts even when defaults.enabled is false
     network_id: "ethereum_mainnet"
     internal_code: "ETH_MAINNET"
     type: "evm"
     start_block: 23080871
     poll_interval: "3s" # faster polling for Ethereum
+    max_lag: 200 # skip ahead if regular worker falls this many blocks behind chain head (default: 100)
+    # Enable debug_traceTransaction for internal transfer detection.
+    # When enabled, receipts are fetched for all contract calls (not just monitored
+    # addresses); traces are requested only for successful ones. This increases RPC
+    # costs compared to the default selective-receipt mode.
+    # Requires at least one node with debug_trace: true.
+    debug_trace: true
+    trace_throttle:
+      trace_rps: 4          # defaults to main rps / 2 if omitted
+      trace_burst: 8         # defaults to main burst / 2 if omitted
+      trace_concurrency: 4   # max parallel debug_traceTransaction calls (default: 4)
     client:
       timeout: "30s" # override global timeout
     throttle:
       batch_size: 20 # smaller batch size
     nodes:
       - url: "https://ethereum-rpc.publicnode.com"
+        headers: # optional: additional HTTP headers sent with every request
+          Origin: "https://myapp.example.com"
+          Referer: "https://myapp.example.com/"
       - url: "https://eth.rpc.blxrbdn.com"
       - url: "https://eth.llamarpc.com"
       - url: "https://rpc.mevblocker.io"
-      # - url: "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}"  # optional
+      # - url: "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}"
+      #   debug_trace: true  # this node supports debug_* namespace
 
   bnb_mainnet:
     network_id: "bnb_mainnet"
@@ -66,16 +91,35 @@ chains:
       - url: "https://bsc.blockrazor.xyz"
       - url: "https://bnb.rpc.subquery.network/public"
 
+  conflux_mainnet:
+    network_id: "conflux_mainnet"
+    internal_code: "CONFLUX_MAINNET"
+    type: "evm"
+    start_block: 0
+    poll_interval: "3s"
+    nodes:
+      - url: "https://evm.confluxrpc.com"
+      - url: "https://conflux-espace-public.unifra.io"
+      - url: "https://1rpc.io/cfx"
+
+  conflux_testnet:
+    network_id: "conflux_testnet"
+    internal_code: "CONFLUX_TESTNET"
+    type: "evm"
+    start_block: 0
+    poll_interval: "3s"
+    nodes:
+      - url: "https://evmtestnet.confluxrpc.com"
+      - url: "https://conflux-espace-testnet.public.blastapi.io"
+
   bitcoin_testnet:
     network_id: "bitcoin_testnet"
     internal_code: "BTC_TESTNET"
     type: "btc"
     start_block: 4440000 # recent testnet block
     poll_interval: "60s" # Bitcoin blocks ~10 minutes
-    confirmations: 1
     reorg_rollback_window: 100
-    index_change_output: false
-    index_utxo: true  # Enable UTXO event extraction and emission (Bitcoin only)
+    index_utxo: false # Enable UTXO event extraction and emission (Bitcoin only)
     nodes:
       - url: "https://bitcoin-testnet-rpc.publicnode.com"
       - url: "https://blockstream.info/testnet/api"
@@ -96,10 +140,8 @@ chains:
     type: "btc"
     start_block: 850000
     poll_interval: "60s"
-    confirmations: 1
     reorg_rollback_window: 100
-    index_change_output: false
-    index_utxo: true  # Enable UTXO event extraction and emission (Bitcoin only)
+    index_utxo: false # Enable UTXO event extraction and emission (Bitcoin only)
     nodes:
       - url: "https://bitcoin-rpc.publicnode.com"
       - url: "https://blockstream.info/api"
@@ -160,6 +202,54 @@ chains:
       concurrency: 12
       parallel: true
 
+  aptos_mainnet:
+    network_id: "aptos_mainnet"
+    internal_code: "APTOS_MAINNET"
+    type: "apt"
+    start_block: 0
+    # Aptos produces blocks quickly, so use sub-second polling to reduce head gap.
+    poll_interval: "200ms"
+    nodes:
+      - url: "https://aptos-rest.publicnode.com"
+      - url: "https://api.mainnet.aptoslabs.com"
+      - url: "https://aptos-mainnet.public.blastapi.io"
+    client:
+      timeout: "15s"
+      max_retries: 3
+      retry_delay: "1s"
+    throttle:
+      rps: 100
+      burst: 200
+      batch_size: 100
+      concurrency: 20
+      parallel: true
+
+  aptos_testnet:
+    network_id: "aptos_testnet"
+    internal_code: "APTOS_TESTNET"
+    type: "apt"
+    start_block: 0
+    # Aptos produces blocks quickly, so use sub-second polling to reduce head gap.
+    poll_interval: "200ms"
+    nodes:
+      - url: "https://api.testnet.aptoslabs.com"
+        auth: # API key required for higher rate limits
+          type: "header"
+          key: "Authorization"
+          value: "Bearer <APTOSLABS_API_KEY>"
+      - url: "https://fullnode.testnet.aptoslabs.com"
+      - url: "https://testnet.aptos-apis.com"
+    client:
+      timeout: "15s"
+      max_retries: 3
+      retry_delay: "1s"
+    throttle:
+      rps: 100
+      burst: 200
+      batch_size: 100
+      concurrency: 20
+      parallel: true
+
   sui_mainnet:
     # Example Sui network using gRPC-based node endpoint.
     # Adjust network_id, internal_code, start_block (checkpoint sequence), and URL to your setup.
@@ -179,7 +269,10 @@ chains:
       batch_size: 200
       concurrency: 12
       parallel: true
-
+    status:
+      healthy_max_pending_blocks: 50
+      slow_max_pending_blocks: 250
+      
   osmosis_mainnet:
     network_id: "osmosis-1"
     internal_code: "OSMO_MAINNET"
@@ -260,6 +353,122 @@ chains:
       batch_size: 20
       concurrency: 4
 
+  xrp_mainnet:
+    network_id: "xrp_mainnet"
+    internal_code: "XRP_MAINNET"
+    type: "xrp"
+    start_block: 0
+    poll_interval: "2s"
+    nodes:
+      - url: "https://xrplcluster.com"
+      - url: "https://s1.ripple.com:51234"
+    client:
+      timeout: "15s"
+      max_retries: 3
+      retry_delay: "1s"
+    throttle:
+      rps: 40
+      burst: 80
+      batch_size: 20
+      concurrency: 6
+      parallel: true
+
+  xrp_testnet:
+    network_id: "xrp_testnet"
+    internal_code: "XRP_TESTNET"
+    type: "xrp"
+    start_block: 0
+    poll_interval: "2s"
+    nodes:
+      - url: "https://s.altnet.rippletest.net:51234"
+      - url: "https://testnet.xrpl-labs.com"
+    client:
+      timeout: "15s"
+      max_retries: 3
+      retry_delay: "1s"
+    throttle:
+      rps: 40
+      burst: 80
+      batch_size: 20
+      concurrency: 6
+      parallel: true
+
+  stellar_mainnet:
+    network_id: "stellar_mainnet"
+    internal_code: "STELLAR_MAINNET"
+    type: "stellar"
+    start_block: 0
+    poll_interval: "2s"
+    nodes:
+      - url: "https://horizon.stellar.org"
+      - url: "https://horizon.publicnode.com"
+    client:
+      timeout: "15s"
+      max_retries: 3
+      retry_delay: "1s"
+    throttle:
+      rps: 40
+      burst: 80
+      batch_size: 20
+      concurrency: 6
+      parallel: true
+
+  stellar_testnet:
+    network_id: "stellar_testnet"
+    internal_code: "STELLAR_TESTNET"
+    type: "stellar"
+    start_block: 0
+    poll_interval: "2s"
+    nodes:
+      - url: "https://horizon-testnet.stellar.org"
+      - url: "https://horizon-testnet.publicnode.com"
+    client:
+      timeout: "15s"
+      max_retries: 3
+      retry_delay: "1s"
+    throttle:
+      rps: 40
+      burst: 80
+      batch_size: 20
+      concurrency: 6
+      parallel: true
+
+  ton_mainnet:
+    network_id: "ton"
+    internal_code: "TON_MAINNET"
+    type: "ton"
+    start_block: 0
+    poll_interval: "1s"
+    nodes:
+      - url: "https://ton.org/global.config.json"
+    throttle:
+      # TON uses shard transaction pagination per masterchain block.
+      batch_size: 10
+      concurrency: 2
+    ton:
+      # Parallel shard-range scanners per master block.
+      shard_scan_workers: 2
+      # Parallel GetTransaction workers inside each shard block.
+      tx_fetch_workers: 6
+
+  ton_testnet:
+    network_id: "ton_testnet"
+    internal_code: "TON_TESTNET"
+    type: "ton"
+    start_block: 0
+    poll_interval: "1s"
+    nodes:
+      - url: "https://ton.org/testnet-global.config.json"
+    throttle:
+      # TON uses shard transaction pagination per masterchain block.
+      batch_size: 10
+      concurrency: 2
+    ton:
+      # Parallel shard-range scanners per master block.
+      shard_scan_workers: 3
+      # Parallel GetTransaction workers inside each shard block.
+      tx_fetch_workers: 8
+
 # Infrastructure services
 services:
   port: 8080 # Health check and monitoring server port
@@ -317,3 +526,7 @@ services:
     in_memory: # alternative config (if not using redis)
       expected_items: 1000000
       false_positive_rate: 0.01
+    sync:
+      enabled: false
+      interval: "1s" # how often to check for new addresses
+      batch_size: 500 # max addresses to fetch per sync cycle

@@ -7,6 +7,12 @@ import (
 	"dario.cat/mergo"
 )
 
+// CanonicalChainKey is the normalized chain identifier used as registry keys, indexer GetName(),
+// and ChainConfig.Name after Load (uppercase + trim). Callers should pass raw YAML keys or CLI names.
+func CanonicalChainKey(s string) string {
+	return strings.ToUpper(strings.TrimSpace(s))
+}
+
 // GetChain returns a chain config by name.
 func (c Chains) GetChain(name string) (ChainConfig, error) {
 	chain, ok := c[name]
@@ -21,6 +27,17 @@ func (c Chains) Names() []string {
 	names := make([]string, 0, len(c))
 	for k := range c {
 		names = append(names, k)
+	}
+	return names
+}
+
+// EnabledNames returns chain names whose enabled flag is either true or omitted.
+func (c Chains) EnabledNames() []string {
+	names := make([]string, 0, len(c))
+	for k, chain := range c {
+		if chain.Enabled == nil || *chain.Enabled {
+			names = append(names, k)
+		}
 	}
 	return names
 }
@@ -54,8 +71,15 @@ func (c Chains) ApplyDefaults(def Defaults) error {
 		if strings.TrimSpace(chain.InternalCode) == "" {
 			chain.InternalCode = strings.ToUpper(name)
 		}
+		if chain.Enabled == nil && def.Enabled != nil {
+			enabled := *def.Enabled
+			chain.Enabled = &enabled
+		}
 		if !chain.FromLatest {
 			chain.FromLatest = def.FromLatest
+		}
+		if !chain.TwoWayIndexing {
+			chain.TwoWayIndexing = def.TwoWayIndexing
 		}
 		if chain.PollInterval == 0 {
 			chain.PollInterval = def.PollInterval
@@ -69,6 +93,10 @@ func (c Chains) ApplyDefaults(def Defaults) error {
 		if err := mergo.Merge(&chain.Throttle, def.Throttle); err != nil {
 			return fmt.Errorf("merge throttle defaults for %s: %w", name, err)
 		}
+		if err := mergo.Merge(&chain.Status, def.Status); err != nil {
+			return fmt.Errorf("merge status defaults for %s: %w", name, err)
+		}
+		chain.Status = chain.Status.Normalize()
 		c[name] = chain
 	}
 	return nil

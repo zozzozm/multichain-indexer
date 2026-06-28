@@ -42,15 +42,7 @@ func NewAddressBloomFilter(cfg Config) WalletAddressBloomFilter {
 }
 
 func (abf *addressBloomFilter) Initialize(ctx context.Context) error {
-	types := []enum.NetworkType{
-		enum.NetworkTypeEVM,
-		enum.NetworkTypeTron,
-		enum.NetworkTypeBtc,
-		enum.NetworkTypeSui,
-		enum.NetworkTypeCosmos,
-	}
-
-	for _, addrType := range types {
+	for _, addrType := range enum.AllNetworkTypes {
 		offset := 0
 		limit := abf.config.BatchSize
 		total := 0

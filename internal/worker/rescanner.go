@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fystack/multichain-indexer/internal/indexer"
+	"github.com/fystack/multichain-indexer/internal/status"
 	"github.com/fystack/multichain-indexer/pkg/common/config"
 	"github.com/fystack/multichain-indexer/pkg/common/enum"
 	"github.com/fystack/multichain-indexer/pkg/events"
@@ -45,6 +46,7 @@ func NewRescannerWorker(
 	emitter events.Emitter,
 	pubkeyStore pubkeystore.Store,
 	failedChan chan FailedBlockEvent,
+	statusRegistry status.StatusRegistry,
 ) *RescannerWorker {
 	return &RescannerWorker{
 		BaseWorker: newWorkerWithMode(
@@ -57,6 +59,7 @@ func NewRescannerWorker(
 			pubkeyStore,
 			ModeRescanner,
 			failedChan,
+			statusRegistry,
 		),
 		failedBlocks:   make(map[uint64]uint8),
 		maxRetries:     RescannerMaxRetries,
@@ -74,17 +77,17 @@ func (rw *RescannerWorker) Start() {
 	)
 
 	// listen failedChan
-	go func() {
+	rw.executeWithRecovery("rescanner failed listener", func() {
 		for evt := range rw.failedChan {
 			rw.addFailedBlock(evt.Block, fmt.Sprintf("from failedChan attempt %d", evt.Attempt))
 		}
-	}()
+	})
 
 	// periodic rescan
 	go rw.run(rw.processRescan)
 
 	// periodic flush
-	go rw.periodicBatchFlush()
+	rw.executeWithRecovery("rescanner flush loop", rw.periodicBatchFlush)
 }
 
 func (rw *RescannerWorker) Stop() {
@@ -112,6 +115,7 @@ func (rw *RescannerWorker) addFailedBlock(block uint64, errMsg string) {
 	if _, exists := rw.failedBlocks[block]; !exists {
 		rw.failedBlocks[block] = 0
 		rw.addSave(block)
+		rw.statusRegistry.MarkFailedBlock(rw.chain.GetName(), block)
 		rw.logger.Info("Added failed block", "block", block, "error", errMsg)
 	}
 }
@@ -121,6 +125,7 @@ func (rw *RescannerWorker) syncFromKV() error {
 	if err != nil {
 		return err
 	}
+	rw.statusRegistry.SetFailedBlocks(rw.chain.GetName(), blocks)
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 	for _, num := range blocks {
@@ -141,6 +146,7 @@ func (rw *RescannerWorker) removeBlocks(blocks []uint64) {
 	}
 	rw.mu.Unlock()
 	rw.addRemove(blocks...)
+	rw.statusRegistry.ClearFailedBlocks(rw.chain.GetName(), blocks)
 }
 
 func (rw *RescannerWorker) incrementRetry(block uint64) {

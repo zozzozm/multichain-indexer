@@ -30,14 +30,15 @@ type (
 	}
 
 	Txn struct {
-		Hash        string `json:"hash"`
-		From        string `json:"from"`
-		To          string `json:"to"`
-		Value       string `json:"value"`
-		Input       string `json:"input"`
-		Gas         string `json:"gas"`
-		GasPrice    string `json:"gasPrice"`
-		BlockNumber string `json:"blockNumber"`
+		Hash             string `json:"hash"`
+		From             string `json:"from"`
+		To               string `json:"to"`
+		Value            string `json:"value"`
+		Input            string `json:"input"`
+		Gas              string `json:"gas"`
+		GasPrice         string `json:"gasPrice"`
+		BlockNumber      string `json:"blockNumber"`
+		TransactionIndex string `json:"transactionIndex"`
 	}
 
 	TxnReceipt struct {
@@ -58,10 +59,25 @@ type (
 	}
 )
 
+// CallTrace is the result from debug_traceTransaction with callTracer.
+type CallTrace struct {
+	From    string      `json:"from"`
+	To      string      `json:"to"`
+	Value   string      `json:"value"`    // hex-encoded wei
+	Type    string      `json:"type"`     // CALL, DELEGATECALL, STATICCALL, CREATE, CREATE2
+	Input   string      `json:"input"`
+	Output  string      `json:"output"`
+	Gas     string      `json:"gas"`
+	GasUsed string      `json:"gasUsed"`
+	Error   string      `json:"error,omitempty"`
+	Calls   []CallTrace `json:"calls,omitempty"`
+}
+
 func (l Log) parseERC20Transfers(
 	fee decimal.Decimal,
 	txHash, network string,
 	blockNumber, ts uint64,
+	txIdx string,
 ) ([]types.Transaction, error) {
 	if len(l.Topics) < 3 || l.Topics[0] != ERC20_TRANSFER_TOPIC {
 		return nil, nil
@@ -77,16 +93,17 @@ func (l Log) parseERC20Transfers(
 	}
 
 	transfer := types.Transaction{
-		TxHash:       txHash,
-		NetworkId:    network,
-		BlockNumber:  blockNumber,
-		FromAddress:  from,
-		ToAddress:    to,
-		AssetAddress: ToChecksumAddress(l.Address),
-		Amount:       amount.String(),
-		Type:         "erc20_transfer",
-		TxFee:        fee,
-		Timestamp:    ts,
+		TxHash:        txHash,
+		NetworkId:     network,
+		BlockNumber:   blockNumber,
+		TransferIndex: txIdx + ":" + hexIndexToDecimal(l.LogIndex),
+		FromAddress:   from,
+		ToAddress:     to,
+		AssetAddress:  ToChecksumAddress(l.Address),
+		Amount:        amount.String(),
+		Type:          "erc20_transfer",
+		TxFee:         fee,
+		Timestamp:     ts,
 	}
 	return []types.Transaction{transfer}, nil
 }

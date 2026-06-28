@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/fystack/multichain-indexer/internal/indexer"
+	"github.com/fystack/multichain-indexer/internal/status"
 	"github.com/fystack/multichain-indexer/pkg/common/config"
+	"github.com/fystack/multichain-indexer/pkg/common/types"
 	"github.com/fystack/multichain-indexer/pkg/events"
 	"github.com/fystack/multichain-indexer/pkg/infra"
 	"github.com/fystack/multichain-indexer/pkg/store/blockstore"
@@ -32,6 +34,7 @@ func NewMempoolWorker(
 	emitter events.Emitter,
 	pubkeyStore pubkeystore.Store,
 	failedChan chan FailedBlockEvent,
+	statusRegistry status.StatusRegistry,
 ) *MempoolWorker {
 	worker := newWorkerWithMode(
 		ctx,
@@ -43,6 +46,7 @@ func NewMempoolWorker(
 		pubkeyStore,
 		ModeMempool,
 		failedChan,
+		statusRegistry,
 	)
 
 	// Cast to Bitcoin indexer (mempool is Bitcoin-specific)
@@ -84,68 +88,127 @@ func (mw *MempoolWorker) Stop() {
 func (mw *MempoolWorker) processMempool() error {
 	mw.logger.Debug("Polling mempool", "chain", mw.chain.GetName())
 
-	transactions, err := mw.btcIndexer.GetMempoolTransactions(mw.ctx)
+	transactions, utxoEvents, err := mw.btcIndexer.GetMempoolTransactions(mw.ctx)
 	if err != nil {
 		mw.logger.Error("Failed to get mempool transactions", "err", err)
 		return err
 	}
 
 	newTxCount := 0
+	newUTXOCount := 0
 	networkType := mw.chain.GetNetworkType()
 
 	for _, tx := range transactions {
 		toMonitored := tx.ToAddress != "" && mw.pubkeyStore.Exist(networkType, tx.ToAddress)
-		if !toMonitored {
+		fromMonitored := false
+		if mw.config.TwoWayIndexing {
+			for _, addr := range tx.AllSenderAddresses() {
+				if mw.pubkeyStore.Exist(networkType, addr) {
+					fromMonitored = true
+					break
+				}
+			}
+		}
+
+		if !toMonitored && !fromMonitored {
 			continue
 		}
 
-		txKey := tx.TxHash + ":" + tx.ToAddress
-		if mw.seenTxs[txKey] {
-			continue
-		}
-
-		mw.seenTxs[txKey] = true
-		newTxCount++
-
-		if err := mw.emitter.EmitTransaction(mw.chain.GetName(), &tx); err != nil {
-			mw.logger.Error("Failed to emit mempool transaction",
-				"txHash", tx.TxHash,
-				"direction", "incoming",
-				"err", err,
-			)
-		} else {
-			mw.logger.Debug("Emitted mempool transaction",
-				"txHash", tx.TxHash,
-				"direction", "incoming",
-				"from", tx.FromAddress,
-				"to", tx.ToAddress,
-				"amount", tx.Amount,
-				"status", tx.Status,
-			)
-		}
-	}
-
-	if newTxCount > 0 {
-		mw.logger.Info("Processed mempool transactions",
-			"new_txs", newTxCount,
-			"total_tracked", len(mw.seenTxs),
-		)
-	}
-
-	// Cleanup: Remove old transactions from tracking (keep last 10k)
-	if len(mw.seenTxs) > 10000 {
-		// Clear half the map (simple approach)
-		count := 0
-		for txKey := range mw.seenTxs {
-			delete(mw.seenTxs, txKey)
-			count++
-			if count > 5000 {
+		// seenTxs grows unbounded as the mempool churns. Once it hits 50k entries,
+		// evict one random entry before inserting the new one to keep memory bounded.
+		// Go map iteration is randomly ordered, so ranging and breaking after the
+		// first delete is a lightweight random-eviction without a separate data structure.
+		if len(mw.seenTxs) >= 50_000 {
+			for k := range mw.seenTxs {
+				delete(mw.seenTxs, k)
 				break
 			}
 		}
-		mw.logger.Debug("Cleaned up old mempool transactions", "removed", count)
+
+		candidates := [2]struct {
+			active    bool
+			direction string
+		}{
+			{toMonitored, types.DirectionIn},
+			{fromMonitored, types.DirectionOut},
+		}
+		for _, c := range candidates {
+			if !c.active {
+				continue
+			}
+			key := tx.TxHash + ":" + c.direction
+			if mw.seenTxs[key] {
+				continue
+			}
+			mw.seenTxs[key] = true
+			newTxCount++
+			dirTx := tx
+			dirTx.Direction = c.direction
+			if err := mw.emitter.EmitTransaction(mw.chain.GetName(), &dirTx); err != nil {
+				mw.logger.Error("Failed to emit mempool transaction",
+					"txHash", tx.TxHash, "direction", c.direction, "err", err)
+			} else {
+				mw.logger.Debug("Emitted mempool transaction",
+					"txHash", tx.TxHash, "direction", c.direction,
+					"from", tx.FromAddress, "to", tx.ToAddress,
+					"amount", tx.Amount, "status", tx.Status)
+			}
+		}
 	}
 
+	if mw.config.IndexUTXO {
+		for i := range utxoEvents {
+			event := &utxoEvents[i]
+
+			if mw.seenTxs[event.TxHash+":utxo"] {
+				continue
+			}
+
+			isRelevant := false
+			for _, utxo := range event.Created {
+				if mw.pubkeyStore.Exist(networkType, utxo.Address) {
+					isRelevant = true
+					break
+				}
+			}
+
+			if !isRelevant {
+				for _, spent := range event.Spent {
+					if mw.pubkeyStore.Exist(networkType, spent.Address) {
+						isRelevant = true
+						break
+					}
+				}
+			}
+
+			if isRelevant {
+				mw.seenTxs[event.TxHash+":utxo"] = true
+				newUTXOCount++
+
+				if err := mw.emitter.EmitUTXO(mw.chain.GetName(), event); err != nil {
+					mw.logger.Error("Failed to emit mempool UTXO",
+						"txHash", event.TxHash,
+						"err", err,
+					)
+				} else {
+					mw.logger.Debug("Emitted mempool UTXO",
+						"txHash", event.TxHash,
+						"created", len(event.Created),
+						"spent", len(event.Spent),
+						"status", event.Status,
+					)
+				}
+			}
+		}
+	}
+
+	if newTxCount > 0 || newUTXOCount > 0 {
+		mw.logger.Info("Processed mempool transactions",
+			"new_txs", newTxCount,
+			"new_utxos", newUTXOCount,
+			"total_tracked", len(mw.seenTxs),
+		)
+	}
 	// Sleep until next poll interval
 	select {
 	case <-mw.ctx.Done():
